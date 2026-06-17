@@ -1,0 +1,6 @@
+.venv
+.idea/
+FIScraper.iml
+.env
+
+*.json
