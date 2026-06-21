@@ -2,7 +2,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.controller.athletes_controller import router as athletes_router
 from app.controller.admin_controller import router as admin_router
 from app.controller.stats_controller import router as stats_router
-from motor.motor_asyncio import AsyncIOMotorClient
+from app.controller.pdf_scraper_controller import router as pdf_router
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.config import settings
@@ -15,7 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 def load_dictionaries():
     """
-    Ładuje zlokalizowane słowniki aplikacyjne (kraje, sesje, zawody) do pamięci RAM.
+    Ładuje zlokalizowane słowniki aplikacyjne (kraje, sesje, zawody, skocznie) do pamięci RAM.
     """
     dictionaries = {
         "countries": {},
@@ -27,37 +27,37 @@ def load_dictionaries():
             "QUA": {"pl": "Kwalifikacje", "eng": "Qualifications"},
             "QUALIFICATION": {"pl": "Kwalifikacje", "eng": "Qualifications"},
             "TRAINING": {"pl": "Trening", "eng": "Training"},
-            "OFFICIAL TRAINING": {"pl": "Trening", "eng": "Official Training"},
-            "TRIAL": {"pl": "Seria próbna", "eng": "Trial Round"},
-            "TRIAL ROUND": {"pl": "Seria próbna", "eng": "Trial Round"}
+            "TRIAL": {"pl": "Seria próbna", "eng": "Trial Round"}
         },
         "categories": {
             "WC": {"pl": "Puchar Świata", "eng": "World Cup"},
-            "OWG": {"pl": "Igrzyska Olimpijskie", "eng": "Olympic Winter Games"},
-            "SFWC": {"pl": "MŚ w Lotach", "eng": "Ski Flying World Championships"},
-            "WJC": {"pl": "MŚ Juniorów", "eng": "World Junior Championships"},
-            "GP": {"pl": "Letnie Grand Prix", "eng": "Grand Prix"},
-            "FESA": {"pl": "Puchar FESA Alpencup", "eng": "FESA Alpencup"},
-            "FC": {"pl": "FIS Cup", "eng": "FIS Cup"},
             "COC": {"pl": "Puchar Kontynentalny", "eng": "Continental Cup"},
-            "WSC": {"pl": "Mistrzostwa Świata", "eng": "World Ski Championships"}
+            "FC": {"pl": "FIS Cup", "eng": "FIS Cup"},
+            "GP": {"pl": "Letnie Grand Prix", "eng": "Grand Prix"},
+            "OWG": {"pl": "Igrzyska Olimpijskie", "eng": "Olympic Winter Games"},
+            "WSC": {"pl": "Mistrzostwa Świata", "eng": "World Ski Championships"},
+            "SFWC": {"pl": "MŚ w Lotach", "eng": "Ski Flying World Championships"},
+            "WJC": {"pl": "MŚ Juniorów", "eng": "World Junior Championships"}
+        },
+        # NOWY SŁOWNIK TYPÓW SKOCZNI
+        "hill_type": {
+            "LARGE": {"pl": "Duża", "eng": "Large"},
+            "NORMAL": {"pl": "Normalna", "eng": "Normal"},
+            "FLYING": {"pl": "Mamut", "eng": "Flying"}
         }
     }
 
-    # Ładowanie krajów z pliku CSV
-    csv_path = Path(__file__).resolve().parent / "dictionaries" / "codes.csv"
+    # Ładowanie krajów z CSV (pozostaje bez zmian)
+    csv_path = Path(__file__).parent / "resources" / "countries.csv"
     if csv_path.exists():
-        with open(csv_path, mode="r", encoding="windows-1250") as f:
-            reader = csv.DictReader(f, delimiter=";")
+        with open(csv_path, mode='r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
             for row in reader:
-                ioc = row.get("IOC", "").strip().upper()
-                iso2 = row.get("ISO-2", "").strip()
-                name_pl = row.get("PL", "").strip()
-                name_eng = row.get("NAME_ENG", "").strip()  # Wyciągamy angielską nazwę z CSV
-
-                if ioc:
-                    dictionaries["countries"][ioc] = {
-                        "iso2": iso2,
+                code = row.get("code", "").strip().upper()
+                name_pl = row.get("name_pl", "").strip()
+                name_eng = row.get("name_eng", "").strip()
+                if code:
+                    dictionaries["countries"][code] = {
                         "pl": name_pl,
                         "eng": name_eng
                     }
@@ -67,10 +67,10 @@ def load_dictionaries():
 
     return dictionaries
 
-
 # ... funkcja lifespan i inicjalizacja app = FastAPI(lifespan=lifespan) bez zmian ...
 
 # 2. Zarządzanie cyklem życia aplikacji (Lifespan) dla MongoDB
+# --- FRAGMENT: Cykl życia aplikacji (Lifespan) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Uruchamiane przy starcie aplikacji
@@ -79,15 +79,45 @@ async def lifespan(app: FastAPI):
     print("Połączono z MongoDB!")
 
     app.state.dicts = load_dictionaries()
-    print("Wszystkie słowniki aplikacyjne (PL/ENG/Kody) zostały pomyślnie załadowane do RAM.")
+
+    # NOWOŚĆ: Agregacja w MongoDB do zbudowania hill_dictionary
+    try:
+        # $group zgrupujebnam unikalne kombinacje tych 4 pól z kolekcji sessions
+        cursor = app.database["sessions"].aggregate([
+            {
+                "$group": {
+                    "_id": {
+                        "name": "$event_place",
+                        "hill_country": "$event_country",
+                        "hill_size": "$hillSize",
+                        "hill_type": "$hillType"
+                    }
+                }
+            }
+        ])
+
+        hills = []
+        async for doc in cursor:
+            h = doc["_id"]
+            if h.get("name"):
+                hills.append(h)
+
+        # Sortowanie alfabetyczne po nazwie miejscowości
+        hills.sort(key=lambda x: x["name"])
+        app.state.dicts["hills"] = hills
+        print(f"Załadowano {len(hills)} unikalnych konfiguracji skoczni z MongoDB do RAM.")
+
+    except Exception as e:
+        print(f"Błąd podczas budowania słownika skoczni z MongoDB: {e}")
+        app.state.dicts["hills"] = []
+
+    print("Wszystkie słowniki aplikacyjne zostały pomyślnie załadowane do RAM.")
 
     yield  # Tu aplikacja działa i obsługuje żądania
 
     # Uruchamiane przy wyłączaniu aplikacji
     app.mongodb_client.close()
     print("Rozłączono z MongoDB.")
-
-
 app = FastAPI(lifespan=lifespan)
 
 # Podpinamy limiter pod FastAPI
@@ -104,4 +134,5 @@ app.add_middleware(
 app.include_router(admin_router)
 app.include_router(athletes_router)
 app.include_router(stats_router)
+app.include_router(pdf_router, prefix="/api/v1")
 

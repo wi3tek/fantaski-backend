@@ -31,7 +31,32 @@ def parse_hill_info(title):
     return hill_size, hill_type
 
 
-def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gender=None, mode="IND", **kwargs):
+def fetch_hillsize_from_race_url(race_url):
+    """
+    Dodatkowa funkcja. Wchodzi bezpośrednio w raceUrl i pobiera
+    hillSize z precyzyjnej klasy 'event-header__kind' w HTML.
+    """
+    if not race_url:
+        return None
+
+    try:
+        response = requests.get(race_url, headers=config.DEFAULT_HEADERS, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            kind_div = soup.find('div', class_='event-header__kind')
+
+            if kind_div:
+                match = re.search(r'HS\s*(\d+)', kind_div.text, re.IGNORECASE)
+                if match:
+                    return int(match.group(1))
+    except Exception as e:
+        print(f" [!] Błąd pobierania rozmiaru skoczni z {race_url}: {e}")
+
+    return None
+
+
+def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gender=None, mode="IND", categorycode=None,
+                        **kwargs):
     endpoint = "general/event-details.html"
     url = config.FIS_BASE_URL + endpoint
 
@@ -55,7 +80,6 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
         for row in rows:
             race_data = {}
 
-
             # --- PŁEĆ WYŚCIGU ---
             gender_div = row.find('div', class_='gender__item')
             race_gender = gender_div.text.strip() if gender_div else None
@@ -74,7 +98,11 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
                 category_tag_mobile = row.find('div', class_='g-xs-12 justify-left')
                 if category_tag_mobile:
                     race_category = category_tag_mobile.text.strip()
-            race_data['session_type'] = 'QUA' if race_category == 'QUA' else race_category + ' COMPETITION'
+            race_data['session_type'] = 'QUA' if race_category == 'QUA' else 'COMPETITION'
+            race_data['race_category'] = race_category
+
+            if race_category != 'QUA' and race_category != categorycode:
+                continue
 
             race_data['type'] = mode
 
@@ -82,8 +110,7 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
             title_div = row.find('div', class_='clip')
             title = title_div.text.strip() if title_div else ""
 
-            # --- LOGIKA FILTROWANIA IND / TEAM ---
-            # 1. Globalne wykluczenia (np. Overall Standings) - zawsze odrzucamy
+            # 1. Globalne wykluczenia (np. Overall Standings)
             if any(title.startswith(prefix) for prefix in config.EXCLUDED_TITLES_GLOBAL):
                 continue
 
@@ -92,19 +119,13 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
 
             # 3. Filtrujemy na podstawie wybranego trybu
             if mode == "IND" and is_team_comp:
-                continue  # Tryb indywidualny, więc pomijamy drużynówki
-
+                continue
             if mode == "TEAM" and not is_team_comp:
-                continue  # Tryb drużynowy, więc pomijamy wszystko co nie jest drużynówką
+                continue
 
             race_data['title'] = title
 
-            # --- INFORMACJE O SKOCZNI ---
-            hill_size, hill_type = parse_hill_info(title)
-            race_data['hillSize'] = hill_size
-            race_data['hillType'] = hill_type
-
-            # --- WYCIĄGANIE RACE ID ---
+            # --- WYCIĄGANIE RACE ID (Przesunięte wyżej, by url był dostępny do sprawdzenia HS) ---
             first_link = row.find('a', href=True)
             if first_link:
                 parsed_url = urlparse(first_link['href'])
@@ -114,9 +135,18 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
                 race_data[
                     'raceUrl'] = f"{config.FIS_BASE_URL}general/results.html?sectorcode={sectorcode}&raceid={race_id}"
             else:
-                race_id = None
                 race_data['raceId'] = None
                 race_data['raceUrl'] = None
+
+            # --- INFORMACJE O SKOCZNI ---
+            hill_size, hill_type = parse_hill_info(title)
+
+            # WYZWALACZ: Jeśli nie ma hill_size w tytule, to idziemy do źródła (raceUrl)
+            if not hill_size and race_data['raceUrl']:
+                hill_size = fetch_hillsize_from_race_url(race_data['raceUrl'])
+
+            race_data['hillSize'] = hill_size
+            race_data['hillType'] = hill_type
 
             # --- DATA I CZAS ---
             date_div = row.find('div', class_='timezone-date')
@@ -168,13 +198,12 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
 
 # --- TESTOWANIE ---
 if __name__ == "__main__":
-
     print("--- TEST: TRYB TEAM ---")
     data_team = fetch_event_details(sectorcode="JP", eventid="55900", seasoncode="2025", filter_gender="M", mode="TEAM")
     for d in data_team:
-        print(f"[TEAM] Znaleziono: {d.get('title')}")
+        print(f"[TEAM] Znaleziono: {d.get('title')} - HS: {d.get('hillSize')}")
 
     print("\n--- TEST: TRYB IND ---")
     data_ind = fetch_event_details(sectorcode="JP", eventid="55900", seasoncode="2025", filter_gender="M", mode="IND")
     for d in data_ind:
-        print(f"[IND] Znaleziono: {d.get('title')}")
+        print(f"[IND] Znaleziono: {d.get('title')} - HS: {d.get('hillSize')}")

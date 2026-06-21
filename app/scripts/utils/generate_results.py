@@ -56,6 +56,7 @@ def process_single_event(event, seasoncode, gendercode, mode, categorycode):
         eventid=event_id,
         seasoncode=seasoncode,
         filter_gender=gendercode,
+        categorycode=categorycode,
         mode=mode
     )
 
@@ -107,50 +108,56 @@ def run_scraper_pipeline(seasoncode="2026", categorycode="WC", gendercode="M", l
             except Exception as exc:
                 print(f"Błąd podczas przetwarzania eventu: {exc}")
 
-    # KROK 4: Zapis do pliku
-    print("\n=== ZAKOŃCZONO SCRAPOWANIE ===")
+    return all_season_data
 
-    # 1. Upewniamy się, że folder "results" istnieje
-    os.makedirs("./../results", exist_ok=True)
+    #
+    # PONIŻEJ Usunięcie funkcjonalności zapisu danych do pliku/
+    #
 
-    # 2. Generujemy nazwę pliku i tworzymy pełną ścieżkę
-    filename = f"wyniki_sezonu_{seasoncode}_{mode}_{gendercode}_{categorycode}.json"
-    output_filepath = os.path.join("./../results", filename)
+    # # KROK 4: Zapis do pliku
+    # print("\n=== ZAKOŃCZONO SCRAPOWANIE ===")
+    #
+    # # 1. Upewniamy się, że folder "results" istnieje
+    # os.makedirs("./../results", exist_ok=True)
+    #
+    # # 2. Generujemy nazwę pliku i tworzymy pełną ścieżkę
+    # filename = f"wyniki_sezonu_{seasoncode}_{mode}_{gendercode}_{categorycode}.json"
+    # output_filepath = os.path.join("./../results", filename)
+    #
+    # # 3. Zapisujemy plik we wskazanym miejscu
+    # with open(output_filepath, "w", encoding="utf-8") as file:
+    #     json.dump(all_season_data, file, indent=4, ensure_ascii=False)
+    #
+    # print(f"Dane zostały prawidłowo połączone i zapisane w pliku: {output_filepath}")
 
-    # 3. Zapisujemy plik we wskazanym miejscu
-    with open(output_filepath, "w", encoding="utf-8") as file:
-        json.dump(all_season_data, file, indent=4, ensure_ascii=False)
-
-    print(f"Dane zostały prawidłowo połączone i zapisane w pliku: {output_filepath}")
-
-
-if __name__ == "__main__":
-    # 1. Definiujemy listy parametrów
-    # Używamy list comprehension, aby szybko wygenerować lata jako stringi (od 2015 do 2026)
-    seasons = [str(year) for year in range(2015, 2027)]
-    categories = ["WC", "OWG", "SFWC", "WJC" ,"GP" , "FESA", "FC" ,"COC", "WSC"]
-
-    total_combinations = len(seasons) * len(categories)
-    print(f"Rozpoczynam masowe scrapowanie. Do przetworzenia: {total_combinations} kombinacji.\n")
-
-    # 2. Mieszamy je za pomocą zagnieżdżonych pętli
-    for season in seasons:
-        for category in categories:
-            print(f"=====================================================")
-            print(f" SCRAPOWANIE: Sezon {season} | Kategoria {category} ")
-            print(f"=====================================================")
-
-            try:
-                run_scraper_pipeline(
-                    seasoncode=season,
-                    categorycode=category,
-                    gendercode="M",
-                    limit_events=None,  # <--- UWAGA: Usuń to lub zmień na None, gdy chcesz pobrać pełny sezon!
-                    mode="IND"
-                )
-            except Exception as e:
-                # Zabezpieczenie: Jeśli scraper z jakiegoś powodu się wywali,
-                # pętla przejdzie do kolejnej kombinacji zamiast zatrzymać cały skrypt.
-                print(f"[BŁĄD KRYTYCZNY] Pominęto kombinację {season} {category} z powodu błędu: {e}")
-
-    print("\n--- ZAKOŃCZONO CAŁY PROCES SCRAPOWANIA ---")
+#
+# if __name__ == "__main__":
+#     # 1. Definiujemy listy parametrów
+#     # Używamy list comprehension, aby szybko wygenerować lata jako stringi (od 2015 do 2026)
+#     seasons = [str(year) for year in range(2015, 2027)]
+#     categories = ["WC", "OWG", "SFWC", "WJC" ,"GP" , "FESA", "FC" ,"COC", "WSC"]
+#
+#     total_combinations = len(seasons) * len(categories)
+#     print(f"Rozpoczynam masowe scrapowanie. Do przetworzenia: {total_combinations} kombinacji.\n")
+#
+#     # 2. Mieszamy je za pomocą zagnieżdżonych pętli
+#     for season in seasons:
+#         for category in categories:
+#             print(f"=====================================================")
+#             print(f" SCRAPOWANIE: Sezon {season} | Kategoria {category} ")
+#             print(f"=====================================================")
+#
+#             try:
+#                 run_scraper_pipeline(
+#                     seasoncode=season,
+#                     categorycode=category,
+#                     gendercode="M",
+#                     limit_events=None,  # <--- UWAGA: Usuń to lub zmień na None, gdy chcesz pobrać pełny sezon!
+#                     mode="IND"
+#                 )
+#             except Exception as e:
+#                 # Zabezpieczenie: Jeśli scraper z jakiegoś powodu się wywali,
+#                 # pętla przejdzie do kolejnej kombinacji zamiast zatrzymać cały skrypt.
+#                 print(f"[BŁĄD KRYTYCZNY] Pominęto kombinację {season} {category} z powodu błędu: {e}")
+#
+#     print("\n--- ZAKOŃCZONO CAŁY PROCES SCRAPOWANIA ---")

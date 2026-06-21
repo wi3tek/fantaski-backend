@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 # Instancja ustawień, z której będziesz korzystać w aplikacji
 settings = Settings()
 
+GEMINI_API_KEY = ""
 
 FIS_BASE_URL = "https://www.fis-ski.com/DB/"
 
@@ -53,3 +54,5 @@ TEAM_COMPETITION_PREFIXES = [
 API_USERS = {
     "fantaski2": "supersekret123"
 }
+
+AI_MODEL = "gemini-2.5-pro"

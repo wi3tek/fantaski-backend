@@ -28,7 +28,8 @@ def parse_athlete_row(a_tag) -> Dict:
 
     # status (np. Active)
     status_div = a_tag.select_one(".clip-xs")
-    data["status"] = status_div.text.strip() if status_div else None
+    athlete_status = status_div.text.strip() if status_div else None
+    data["status"] = "Active" if  athlete_status == "Active" else "Inactive"
 
     # competitor id z pierwszej kolumny (liczba)
     comp_id_text = ""
@@ -119,18 +120,18 @@ def parse_fragment_html(html_text: str) -> List[Dict]:
     return results
 
 # --- Pobranie jednej paczki (limit/offset) z data.fis-ski.com ---
-def fetch_chunk(limit: int = DEFAULT_LIMIT, offset: int = 0, headers: dict = DEFAULT_HEADERS) -> List[Dict]:
+def fetch_chunk(birthyear: str, limit: int = DEFAULT_LIMIT, offset: int = 0, headers: dict = DEFAULT_HEADERS) -> List[Dict]:
     params = {
         "lastname": "",
         "firstname": "",
         "sectorcode": "JP",
         "gendercode": "M",
-        "birthyear": "",
+        "birthyear": birthyear,
         "skiclub": "",
         "skis": "",
         "nationcode": "",
         "fiscode": "",
-        "status": "O",
+        "status": "",
         "search": "true",
         "limit": str(limit),
         "offset": str(offset),
@@ -146,14 +147,14 @@ def fetch_chunk(limit: int = DEFAULT_LIMIT, offset: int = 0, headers: dict = DEF
 
 
 # --- Główna funkcja iterująca po paczkach aż do wyczerpania ---
-def fetch_all_athletes_by_chunks(limit: int = DEFAULT_LIMIT) -> List[Dict]:
+def fetch_all_athletes_by_chunks(birthyear:str,limit: int = DEFAULT_LIMIT) -> List[Dict]:
     all_results: List[Dict] = []
     seen_ids = set()
     offset = 0
 
     while True:
-        print(f"Fetching chunk offset={offset} limit={limit}")
-        chunk = fetch_chunk(limit=limit, offset=offset)
+        print(f"Fetching chunk offset={offset} limit={limit}, year= {birthyear}")
+        chunk = fetch_chunk(birthyear=birthyear,limit=limit, offset=offset)
         if not chunk:
             print("Empty chunk or request failed, stopping.")
             break
@@ -171,7 +172,7 @@ def fetch_all_athletes_by_chunks(limit: int = DEFAULT_LIMIT) -> List[Dict]:
                 new_seen_count += 1
 
                 # 2. FILTROWANIE: Jeśli brakuje wieku LUB daty urodzenia, pomijamy zapis do wyników
-                if r.get("age") is None or r.get("birthdate") or r.get("status") is None:
+                if r.get("birthdate") is None or r.get("status") is None:
                     continue
 
                 # 3. Jeśli wszystko jest ok, dodajemy do ostatecznej listy
@@ -179,7 +180,7 @@ def fetch_all_athletes_by_chunks(limit: int = DEFAULT_LIMIT) -> List[Dict]:
                 added_to_results += 1
 
         print(
-            f"Chunk returned {len(chunk)} rows. Found {new_seen_count} new unique IDs. Saved {added_to_results} valid athletes.")
+            f"Chunk returned {len(chunk)} rows. Found {new_seen_count} new unique IDs. Saved {added_to_results} valid athletes: {all_results}")
 
         # jeśli zwrócono mniej niż limit, to koniec
         if len(chunk) < limit:
@@ -194,16 +195,3 @@ def fetch_all_athletes_by_chunks(limit: int = DEFAULT_LIMIT) -> List[Dict]:
         offset += limit
 
     return all_results
-
-# --- CLI / zapis do pliku ---
-def main():
-    athletes = fetch_all_athletes_by_chunks(limit=1000)
-    print(f"Found {len(athletes)} unique athletes.")
-    out_path = os.path.join("app", "scripts", "athletes_parsed.json")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(athletes, f, ensure_ascii=False, indent=2)
-    print(f"Saved to {out_path}")
-
-# if __name__ == "__main__":
-#     main()
