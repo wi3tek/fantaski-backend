@@ -43,7 +43,7 @@ def process_single_race(race):
     print(f"    [Wątek Wyników] <- Zakończono: {race_title}")
     return race
 
-
+# Procesujemy pojedynczy event z kalendarza.
 def process_single_event(event, seasoncode, gendercode, mode, categorycode):
     event_id = event.get("id")
     place = event.get("place", "Nieznane")
@@ -80,17 +80,16 @@ def process_single_event(event, seasoncode, gendercode, mode, categorycode):
 
 
 def run_scraper_pipeline(seasoncode="2026", categorycode="WC", gendercode="M", limit_events=None, mode="IND"):
-    print("=== ROZPOCZĘCIE SCRAPOWANIA WIELOWĄTKOWEGO ===")
-
-    # KROK 1: Pobieranie kalendarza (Główny wątek)
     print(f"\n[KROK 1] Pobieranie kalendarza (Sezon: {seasoncode}, Płeć: {gendercode})...")
+    # Pobieramy kalendarz FIS dla danego sezonu, kategorii zawodów orac płci.
+    # Jest to lista wydarzeń, do których skrypt się pokolei dostaje analizując ich htmle.
     calendar = fetch_fis_calendar(seasoncode=seasoncode, categorycode=categorycode, gendercode=gendercode)
 
     if not calendar:
         print("Nie znaleziono zawodów w kalendarzu. Przerywam.")
         return
 
-    events_to_process = calendar[:limit_events]
+    events_to_process = calendar[:limit_events] # jeśli limit_events = None to będziemy analizować wszystkie eventy z kalendarza
     all_season_data = []
 
     # KROK 2 & 3: Zrównoleglenie pobierania eventów i wyścigów

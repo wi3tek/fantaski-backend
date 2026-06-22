@@ -1,9 +1,9 @@
 # app/controller/admin_controller.py
 import json
 import hashlib
-from typing import List, Optional
+from typing import List
 
-from fastapi import APIRouter, Request, Depends, HTTPException
+from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 from pymongo import UpdateOne
 from datetime import datetime, date
@@ -11,7 +11,7 @@ from datetime import datetime, date
 from app.infrastructure.limiter import limiter
 # from app.auth import verify_api_key # Odkomentuj na produkcji
 
-from app.scripts.utils.generate_results import run_scraper_pipeline
+from services.scrapers.generate_results import run_scraper_pipeline
 from app.services.scrapers.fis_athletes_scraper import fetch_all_athletes_by_chunks
 
 router = APIRouter(
@@ -23,7 +23,7 @@ router = APIRouter(
 
 # --- MODELE PYDANTIC ---
 
-class ScrapeRequest(BaseModel):
+class RefreshRequest(BaseModel):
     seasons: List[str]
     categories: List[str]
     mode: str = "IND"
@@ -141,20 +141,20 @@ async def refresh_athletes(request: Request):
 
 @router.post("/refresh-results")
 @limiter.limit("100/minute")
-async def refresh_results(request: Request, payload: ScrapeRequest):
-    # (Tutaj pozostaje bez zmian)
-    db = request.app.database
-    sessions_col = db["sessions"]
-    review_col = db["sessions_review"]
-    hills_col = db["hills"]
+async def refresh_results(request: Request, payload: RefreshRequest): # Request - standardo wy request w FastAPI, RefreshRequest - Request z metody POST
+
+    db = request.app.database # inicjacja połączenia z bazą
+    sessions_col = db["sessions"] # kolekcja sessions
+    review_col = db["sessions_review"] # kol. sessions_review
+    hills_col = db["hills"] # kol. hills, która mie istnieje
 
     stats = {"inserted": 0, "sent_to_review": 0, "unchanged": 0, "combinations_processed": 0}
     hill_ops_dict = {}
 
-    for season in payload.seasons:
-        for category in payload.categories:
-            stats["combinations_processed"] += 1
-            scraped_events = run_scraper_pipeline(
+    for season in payload.seasons: # dla każdego sezonu odpalamy pętlę
+        for category in payload.categories: # dla każdej kategorii zawodów (np. WC, COC) w ramach danego sezonu odpalamy sesje
+            stats["combinations_processed"] += 1 # - do statystyk
+            scraped_events = run_scraper_pipeline( # Odpalamy dla jednej kombinacji SEASON | CATEGORY
                 seasoncode=season,
                 categorycode=category,
                 gendercode="M",
