@@ -4,57 +4,6 @@ from urllib.parse import urlparse, parse_qs
 import re
 from app import config
 
-
-def parse_hill_info(title):
-    """
-    Na podstawie tytułu wyciąga rozmiar skoczni (liczba po HS) oraz jej typ.
-    """
-    if not title:
-        return None, None
-
-    hill_size = None
-    hill_type = None
-
-    # Wyciąganie hillSize (szukamy 'HS' i łapiemy ciąg cyfr po nim)
-    hs_match = re.search(r'HS(\d+)', title)
-    if hs_match:
-        hill_size = int(hs_match.group(1))
-
-    # Wyciąganie hillType
-    if "Flying Hill" in title:
-        hill_type = "FLYING"
-    elif "Large Hill" in title:
-        hill_type = "LARGE"
-    elif "Normal Hill" in title:
-        hill_type = "NORMAL"
-
-    return hill_size, hill_type
-
-
-def fetch_hillsize_from_race_url(race_url):
-    """
-    Dodatkowa funkcja. Wchodzi bezpośrednio w raceUrl i pobiera
-    hillSize z precyzyjnej klasy 'event-header__kind' w HTML.
-    """
-    if not race_url:
-        return None
-
-    try:
-        response = requests.get(race_url, headers=config.DEFAULT_HEADERS, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            kind_div = soup.find('div', class_='event-header__kind')
-
-            if kind_div:
-                match = re.search(r'HS\s*(\d+)', kind_div.text, re.IGNORECASE)
-                if match:
-                    return int(match.group(1))
-    except Exception as e:
-        print(f" [!] Błąd pobierania rozmiaru skoczni z {race_url}: {e}")
-
-    return None
-
-
 def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gender=None, mode="IND", categorycode=None,
                         **kwargs):
     endpoint = "general/event-details.html"
@@ -137,16 +86,6 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
             else:
                 race_data['raceId'] = None
                 race_data['raceUrl'] = None
-
-            # --- INFORMACJE O SKOCZNI ---
-            hill_size, hill_type = parse_hill_info(title)
-
-            # WYZWALACZ: Jeśli nie ma hill_size w tytule, to idziemy do źródła (raceUrl)
-            if not hill_size and race_data['raceUrl']:
-                hill_size = fetch_hillsize_from_race_url(race_data['raceUrl'])
-
-            race_data['hillSize'] = hill_size
-            race_data['hillType'] = hill_type
 
             # --- DATA I CZAS ---
             date_div = row.find('div', class_='timezone-date')

@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 from app import config
+import re
 
 
 def fetch_race_results(race_url, session_type="Competition"):
@@ -13,6 +14,29 @@ def fetch_race_results(race_url, session_type="Competition"):
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
+
+
+        # --- 1. WYCIĄGANIE DANYCH O SKOCZNI ---
+        hill_size = None
+        hill_size_unit = None
+        hill_type = None
+
+        kind_div = soup.find('div', class_='event-header__kind')
+        if kind_div:
+            kind_text = kind_div.text.strip()
+            if "Flying" in kind_text:
+                hill_type = "FLYING"
+            elif "Large" in kind_text:
+                hill_type = "LARGE"
+            elif "Normal" in kind_text:
+                hill_type = "NORMAL"
+
+            match = re.search(r'(HS|K)\s*(\d+)', kind_text, re.IGNORECASE)
+            if match:
+                hill_size_unit = match.group(1).upper()
+                hill_size = int(match.group(2))
+
+
         athletes_results = []
         is_cancelled = True
 
@@ -121,6 +145,9 @@ def fetch_race_results(race_url, session_type="Competition"):
                 })
 
         return {
+            "hill_size": hill_size,
+            "hill_size_unit": hill_size_unit,
+            "hill_type": hill_type,
             "is_cancelled": is_cancelled,
             "results": athletes_results
         }

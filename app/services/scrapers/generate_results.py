@@ -36,6 +36,12 @@ def process_single_race(race):
         else:
             race_results = fetch_ind_results(race_url, session_type=session_type)
 
+        if race_results:
+            # PRZEPISANIE METADANYCH SKOCZNI DO GŁÓWNEGO DOKUMENTU SESJI
+            race["hillSize"] = race_results.pop("hill_size", None)
+            race["hill_size_unit"] = race_results.pop("hill_size_unit", None)
+            race["hillType"] = race_results.pop("hill_type", None)
+
         race["results_data"] = race_results
     else:
         race["results_data"] = None

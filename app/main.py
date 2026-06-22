@@ -43,21 +43,24 @@ def load_dictionaries():
         "hill_type": {
             "LARGE": {"pl": "Duża", "eng": "Large"},
             "NORMAL": {"pl": "Normalna", "eng": "Normal"},
-            "FLYING": {"pl": "Mamut", "eng": "Flying"}
+            "FLYING": {"pl": "Mamucia", "eng": "Flying"}
         }
     }
 
-    # Ładowanie krajów z CSV (pozostaje bez zmian)
-    csv_path = Path(__file__).parent / "resources" / "countries.csv"
+    # Ładowanie krajów z pliku CSV
+    csv_path = Path(__file__).resolve().parent / "dictionaries" / "codes.csv"
     if csv_path.exists():
-        with open(csv_path, mode='r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
+        with open(csv_path, mode="r", encoding="windows-1250") as f:
+            reader = csv.DictReader(f, delimiter=";")
             for row in reader:
-                code = row.get("code", "").strip().upper()
-                name_pl = row.get("name_pl", "").strip()
-                name_eng = row.get("name_eng", "").strip()
-                if code:
-                    dictionaries["countries"][code] = {
+                ioc = row.get("IOC", "").strip().upper()
+                iso2 = row.get("ISO-2", "").strip()
+                name_pl = row.get("PL", "").strip()
+                name_eng = row.get("NAME_ENG", "").strip()  # Wyciągamy angielską nazwę z CSV
+
+                if ioc:
+                    dictionaries["countries"][ioc] = {
+                        "iso2": iso2,
                         "pl": name_pl,
                         "eng": name_eng
                     }

@@ -59,15 +59,6 @@ def parse_athlete_row(a_tag) -> Dict:
     country_short = a_tag.select_one(".country__name-short")
     data["country_code"] = country_short.text.strip() if country_short else None
 
-    # wiek i data urodzenia / rok
-    age_div = a_tag.select_one(".hidden-sm-down .q-sm-2, .g-lg-1.q-sm-2")
-    age = age_div.text.strip() if age_div else ""
-
-    if age and len(age) > 0:
-        data["age"] = int(age)
-    else:
-        data["age"] = None
-
     birthdate_div = a_tag.select_one(".hidden-sm-down .g-lg-2, .g-lg-2.justify-right")
     if birthdate_div:
         birthdate = birthdate_div.text.strip()
