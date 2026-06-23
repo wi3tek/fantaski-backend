@@ -13,6 +13,7 @@ from app.infrastructure.limiter import limiter
 
 from app.services.scrapers.generate_results import run_scraper_pipeline
 from app.services.scrapers.fis_athletes_scraper import fetch_all_athletes_by_chunks
+from services.athletes_esm_prices import update_esm_prices
 
 router = APIRouter(
     prefix="/admin",
@@ -53,39 +54,27 @@ async def get_admin_config(request: Request):
     return {"categories": request.app.state.dicts.get("categories", {})}
 
 
+@router.post("/update-prices")
+@limiter.limit("100/minute")
+async def update_prices(request: Request):
+    db = request.app.database
+    countries_dict = request.app.state.dicts.get("countries", {})
+    prices = await update_esm_prices(db,countries_dict)
+
+    return prices
+
+
+class RefreshAthletesRequest(BaseModel):
+    onlyPriceUpdate: bool = False
+
+
 @router.post("/refresh-athletes")
 @limiter.limit("100/minute")
-async def refresh_athletes(request: Request):
+async def refresh_athletes(request: Request, payload: RefreshAthletesRequest):
     db = request.app.database
     athletes_col = db["athletes"]
     review_col = db["athletes_review"]
-
-    all_scraped_athletes_dict = {}
-
-    for year in range(1950, 2021):
-        scraped_chunk = fetch_all_athletes_by_chunks(str(year), limit=1000)
-
-        if not scraped_chunk:
-            continue
-
-        for athlete in scraped_chunk:
-            fis_code_raw = athlete.get("fis_code")
-            if not fis_code_raw:
-                continue
-
-            fis_code = int(fis_code_raw)
-            athlete["fis_code"] = fis_code
-
-            current_status = athlete.get("status")
-            athlete["status"] = "Active" if current_status == "Active" else "Inactive"
-
-            all_scraped_athletes_dict[fis_code] = athlete
-
-    if not all_scraped_athletes_dict:
-        raise HTTPException(
-            status_code=500,
-            detail="Scraper FIS zwrócił 0 wyników dla wszystkich lat. Przerywam operację, by nie usunąć zawodników."
-        )
+    countries_dict = request.app.state.dicts.get("countries", {})
 
     current_athletes_cursor = athletes_col.find({})
     current_athletes = {}
@@ -93,40 +82,115 @@ async def refresh_athletes(request: Request):
         if "fis_code" in a:
             current_athletes[int(a["fis_code"])] = a
 
-    seen_fis_codes = set()
     stats = {"new_to_review": 0, "modified_to_review": 0, "deleted_to_review": 0, "unchanged": 0}
 
-    for fis_code, athlete in all_scraped_athletes_dict.items():
-        seen_fis_codes.add(fis_code)
+    # ====================================================
+    # TRYB 1: TYLKO AKTUALIZACJA CEN (KIERUNEK -> KWARANTANNA)
+    # ====================================================
+    if payload.onlyPriceUpdate:
+        print("Pobieranie cen z ESM (tryb dry_run - weryfikacja do kwarantanny)...")
+        prices_result = await update_esm_prices(db, countries_dict, dry_run=True)
+        esm_updates = prices_result.get("details", {}).get("esm_updates", {})
+        review_bulk_ops = []
 
-        current_hash = generate_full_checksum(athlete)
-        athlete["checksum"] = current_hash
-        athlete["last_checked"] = datetime.utcnow()
+        for fis_code, updates in esm_updates.items():
+            existing = current_athletes.get(fis_code)
+            if existing:
+                current_hash = generate_full_checksum(existing)
 
-        existing = current_athletes.get(fis_code)
+                # Tworzymy symulowanego skoczka z nową ceną
+                updated_athlete = existing.copy()
+                updated_athlete.update(updates)
 
-        if not existing:
-            athlete["review_reason"] = "NEW"
-            await review_col.update_one({"fis_code": fis_code}, {"$set": athlete}, upsert=True)
-            stats["new_to_review"] += 1
-        else:
-            existing_hash = generate_full_checksum(existing)
-            if current_hash == existing_hash:
-                await athletes_col.update_one({"fis_code": fis_code}, {"$set": {"last_checked": datetime.utcnow()}})
-                stats["unchanged"] += 1
+                new_hash = generate_full_checksum(updated_athlete)
+
+                if current_hash != new_hash:
+                    updated_athlete["review_reason"] = "MODIFIED"
+                    updated_athlete["original_checksum"] = current_hash
+                    updated_athlete["checksum"] = new_hash
+                    updated_athlete["last_checked"] = datetime.utcnow()
+                    review_bulk_ops.append(UpdateOne({"fis_code": fis_code}, {"$set": updated_athlete}, upsert=True))
+                    stats["modified_to_review"] += 1
+                else:
+                    stats["unchanged"] += 1
+
+        if review_bulk_ops:
+            await review_col.bulk_write(review_bulk_ops)
+
+        return {
+            "message": "Pobrano ceny z ESM. Zmiany wysłane do kwarantanny.",
+            "stats": stats,
+            "esmPricesData": prices_result
+        }
+
+    # ====================================================
+    # TRYB 2: PEŁNY REFRESH FIS (1970 - 2014)
+    # ====================================================
+    else:
+        all_scraped_athletes_dict = {}
+
+        for year in range(1970, 2015):
+            scraped_chunk = fetch_all_athletes_by_chunks(str(year), limit=1000)
+            if not scraped_chunk:
+                continue
+
+            for athlete in scraped_chunk:
+                fis_code_raw = athlete.get("fis_code")
+                if not fis_code_raw:
+                    continue
+
+                fis_code = int(fis_code_raw)
+                athlete["fis_code"] = fis_code
+
+                current_status = athlete.get("status")
+                athlete["status"] = "Active" if current_status == "Active" else "Inactive"
+                all_scraped_athletes_dict[fis_code] = athlete
+
+        if not all_scraped_athletes_dict:
+            raise HTTPException(status_code=500, detail="Scraper FIS zwrócił 0 wyników dla wszystkich lat.")
+
+        seen_fis_codes = set()
+        athletes_bulk_ops = []
+        review_bulk_ops = []
+
+        for fis_code, athlete in all_scraped_athletes_dict.items():
+            seen_fis_codes.add(fis_code)
+            current_hash = generate_full_checksum(athlete)
+            athlete["checksum"] = current_hash
+            athlete["last_checked"] = datetime.utcnow()
+
+            existing = current_athletes.get(fis_code)
+            if not existing:
+                athlete["review_reason"] = "NEW"
+                review_bulk_ops.append(UpdateOne({"fis_code": fis_code}, {"$set": athlete}, upsert=True))
+                stats["new_to_review"] += 1
             else:
-                athlete["review_reason"] = "MODIFIED"
-                athlete["original_checksum"] = existing_hash
-                await review_col.update_one({"fis_code": fis_code}, {"$set": athlete}, upsert=True)
-                stats["modified_to_review"] += 1
+                existing_hash = generate_full_checksum(existing)
+                if current_hash == existing_hash:
+                    athletes_bulk_ops.append(
+                        UpdateOne({"fis_code": fis_code}, {"$set": {"last_checked": datetime.utcnow()}}))
+                    stats["unchanged"] += 1
+                else:
+                    athlete["review_reason"] = "MODIFIED"
+                    athlete["original_checksum"] = existing_hash
+                    review_bulk_ops.append(UpdateOne({"fis_code": fis_code}, {"$set": athlete}, upsert=True))
+                    stats["modified_to_review"] += 1
 
-    for fis_code, existing_athlete in current_athletes.items():
-        if fis_code not in seen_fis_codes:
-            existing_athlete["review_reason"] = "DELETED"
-            await review_col.update_one({"fis_code": fis_code}, {"$set": existing_athlete}, upsert=True)
-            stats["deleted_to_review"] += 1
+        for fis_code, existing_athlete in current_athletes.items():
+            if fis_code not in seen_fis_codes:
+                existing_athlete["review_reason"] = "DELETED"
+                review_bulk_ops.append(UpdateOne({"fis_code": fis_code}, {"$set": existing_athlete}, upsert=True))
+                stats["deleted_to_review"] += 1
 
-    return {"message": "Analiza skoczków zakończona", "stats": stats}
+        if athletes_bulk_ops:
+            await athletes_col.bulk_write(athletes_bulk_ops)
+        if review_bulk_ops:
+            await review_col.bulk_write(review_bulk_ops)
+
+        # Standardowe wstrzyknięcie cen bez dry_run dla pełnego cyklu
+        prices_result = await update_esm_prices(db, countries_dict, dry_run=False)
+
+        return {"message": "Analiza skoczków zakończona", "stats": stats, "esmPricesData": prices_result}
 
 
 @router.post("/refresh-results")

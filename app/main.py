@@ -60,6 +60,7 @@ def load_dictionaries():
 
                 if ioc:
                     dictionaries["countries"][ioc] = {
+                        "ioc": ioc,
                         "iso2": iso2,
                         "pl": name_pl,
                         "eng": name_eng

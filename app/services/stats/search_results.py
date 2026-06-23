@@ -98,12 +98,15 @@ async def search_athlete_results(db, names=None, place=None, hill_type=None, dat
                 grouped_results[ath_name].append(record)
 
     # --- 4. SORTOWANIE I LIMITOWANIE ---
-    for ath_name in grouped_results:
-        # Sortowanie chronologiczne wyników dla każdego zawodnika
-        grouped_results[ath_name].sort(
-            key=lambda x: (x["date"], x["time"]),
-            reverse=True
-        )
+        # --- 4. SORTOWANIE I LIMITOWANIE ---
+        for ath_name in grouped_results:
+            # Sortowanie chronologiczne wyników dla każdego zawodnika
+            # Dodajemy 'round' do klucza sortowania. Używamy 'or 0', aby uniknąć błędu
+            # w przypadku braku numeru rundy (None).
+            grouped_results[ath_name].sort(
+                key=lambda x: (x["date"], x["time"], x.get("round") or 0),
+                reverse=True
+            )
 
         # Zastosowanie limitu
         if limit is not None:

@@ -102,15 +102,16 @@ async def get_session_details(request: Request, session_id: str):
 @router.get("/form-data")
 @limiter.limit("60/minute")
 async def get_stats_form_data(request: Request):
-    """Zwraca słowniki (w tym dynamicznie wygenerowane skocznie) dla wyszukiwarki statystyk."""
+    """Zwraca słowniki (w tym dynamicznie wygenerowane skocznie, kategorie i sesje) dla wyszukiwarki statystyk."""
     dicts = request.app.state.dicts
 
     # Z całego słownika hills wyciągamy tylko unikalne nazwy miejscowości
-    # set() usunie duplikaty (np. jeśli w jednym miejscu jest skocznia Duża i Normalna)
     hills_list = dicts.get("hills", [])
     places = sorted(list(set([h["name"] for h in hills_list if h.get("name")])))
 
     return {
         "places": places,
-        "hill_types": dicts.get("hill_type", {})
+        "hill_types": dicts.get("hill_type", {}),
+        "categories": dicts.get("categories", {}), # DODANO SŁOWNIK KATEGORII
+        "sessions": dicts.get("sessions", {})      # DODANO SŁOWNIK SESJI
     }

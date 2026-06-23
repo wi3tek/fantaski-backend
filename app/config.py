@@ -56,3 +56,8 @@ API_USERS = {
 }
 
 AI_MODEL = "gemini-2.5-pro"
+
+CONFIG_EMAIL = "qsc71138@kisoq.com"
+CONFIG_PASS = "q!sVcB7fgR131H3jkQ8"
+ESM_AUTH_URL = "https://esmdomainserviceproduction.azurewebsites.net/users/auth"
+ESM_DATA_URL = "https://esmdomainserviceproduction.azurewebsites.net/players/clientData/5f7f6aeb9ed6e90012549269"
