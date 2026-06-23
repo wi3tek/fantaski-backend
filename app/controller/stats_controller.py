@@ -115,3 +115,27 @@ async def get_stats_form_data(request: Request):
         "categories": dicts.get("categories", {}), # DODANO SŁOWNIK KATEGORII
         "sessions": dicts.get("sessions", {})      # DODANO SŁOWNIK SESJI
     }
+
+
+@router.get("/athletes/with-prices")
+@limiter.limit("60/minute")
+async def get_athletes_with_prices(request: Request):
+    """Pobiera listę skoczków z określoną ceną do porównywarki ESM."""
+    db = request.app.database
+
+    # Filtrujemy tylko aktywnych zawodników, którzy mają ustaloną cenę > 0
+    cursor = db["athletes"].find(
+        {"price": {"$exists": True, "$gt": 0}, "isDisabled": False},
+        {"full_name": 1, "fis_code": 1, "price": 1, "_id": 0}
+    ).sort("price", -1)  # -1 oznacza sortowanie malejące (najdrożsi na górze)
+
+    athletes = await cursor.to_list(length=1000)
+
+    # Przemapowujemy klucz na 'name', aby Front-End łatwiej to skonsumował
+    return [
+        {
+            "name": a.get("full_name"),
+            "fis_code": a.get("fis_code"),
+            "price": a.get("price")
+        } for a in athletes
+    ]

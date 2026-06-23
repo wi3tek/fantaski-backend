@@ -21,11 +21,7 @@ def load_dictionaries():
         "countries": {},
         "sessions": {
             "COMPETITION": {"pl": "Konkurs", "eng": "Competition"},
-            "WC COMPETITION": {"pl": "Konkurs", "eng": "World Cup Competition"},
-            "COC COMPETITION": {"pl": "Konkurs", "eng": "Continental Cup Competition"},
-            "FC COMPETITION": {"pl": "Konkurs", "eng": "FIS Cup Competition"},
             "QUA": {"pl": "Kwalifikacje", "eng": "Qualifications"},
-            "QUALIFICATION": {"pl": "Kwalifikacje", "eng": "Qualifications"},
             "TRAINING": {"pl": "Trening", "eng": "Training"},
             "TRIAL": {"pl": "Seria próbna", "eng": "Trial Round"}
         },
@@ -39,7 +35,6 @@ def load_dictionaries():
             "SFWC": {"pl": "MŚ w Lotach", "eng": "Ski Flying World Championships"},
             "WJC": {"pl": "MŚ Juniorów", "eng": "World Junior Championships"}
         },
-        # NOWY SŁOWNIK TYPÓW SKOCZNI
         "hill_type": {
             "LARGE": {"pl": "Duża", "eng": "Large"},
             "NORMAL": {"pl": "Normalna", "eng": "Normal"},

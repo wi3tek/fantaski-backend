@@ -4,120 +4,160 @@ from collections import defaultdict
 
 
 async def search_athlete_results(db, names=None, place=None, hill_type=None, date_from=None, date_to=None,
-                                 category=None, rank=None, limit=None, session_type=None):
+                                 category=None, limit=None, session_type=None):
     """
-    Przeszukuje kolekcję 'sessions' w bazie MongoDB według podanych kryteriów
-    i zwraca wyniki jako listę obiektów gotową dla nowej wersji frontendu.
+    Przeszukuje kolekcję 'sessions' w bazie MongoDB według podanych kryteriów.
+    Zoptymalizowane: Ogranicza wyniki do dokładnie N ostatnich MOŻLIWYCH SKOKÓW (Serii/Rund).
     """
 
-    # --- 1. BUDOWANIE ZAPYTANIA DO MONGODB (FILTROWANIE NA POZIOMIE BAZY) ---
-    query = {}
+    # --- 1. BUDOWANIE ZAPYTANIA $match (FILTROWANIE W BAZIE) ---
+    match_stage = {}
 
     if place:
-        # Szukamy po części nazwy miejsca (niezależnie od wielkości liter)
-        query["event_place"] = {"$regex": place, "$options": "i"}
+        match_stage["event_place"] = {"$regex": place, "$options": "i"}
 
     if category:
-        query["category_code"] = category
+        if isinstance(category, list) and len(category) > 0:
+            match_stage["category_code"] = {"$in": category}
+        else:
+            match_stage["category_code"] = category
 
     if hill_type:
-        query["hillType"] = hill_type
+        match_stage["hillType"] = hill_type
 
     if session_type:
-        query["session_type"] = {"$regex": session_type, "$options": "i"}
+        match_stage["session_type"] = {"$regex": session_type, "$options": "i"}
 
-    # Filtrowanie po dacie (MongoDB świetnie radzi sobie z formatem YYYY-MM-DD)
     if date_from or date_to:
-        query["date"] = {}
+        match_stage["date"] = {}
         if date_from:
-            query["date"]["$gte"] = date_from
+            match_stage["date"]["$gte"] = date_from
         if date_to:
-            query["date"]["$lte"] = date_to
+            match_stage["date"]["$lte"] = date_to
 
-    # Wstępne filtrowanie po nazwiskach już na poziomie bazy danych (optymalizacja)
     if names:
-        # Tworzymy regex typu: "KOUDELKA Roman|STOCH Kamil"
-        regex_names = "|".join([re.escape(n) for n in names])
-        query["results_data.results.name"] = {"$regex": regex_names, "$options": "i"}
+        match_stage["results_data.results"] = {"$elemMatch": {"name": {"$in": names}}}
 
-    if rank:
-        query["results_data.results.rank"] = rank
+    pipeline = [{"$match": match_stage}]
 
-    # --- 2. POBRANIE DANYCH Z BAZY ---
-    # Pobieramy pasujące sesje. Jeśli nie podano filtrów, może być tego dużo, ale MongoDB to ogarnie
-    cursor = db["sessions"].find(query)
+    # --- 2. SORTOWANIE SESJI ---
+    pipeline.append({"$sort": {"date": -1, "time": -1}})
+
+    # Pobieramy N sesji - jedna sesja to zwykle 1-3 skoków, więc
+    # pobranie 'limit' sesji gwarantuje, że będziemy mieli co przycinać.
+    if limit:
+        pipeline.append({"$limit": limit})
+
+    # --- 3. OPTYMALIZACJA PAYLOADU ($project + $filter) ---
+    if names:
+        pipeline.append({
+            "$project": {
+                "codex": 1,
+                "raceId": 1,
+                "date": 1,
+                "time": 1,
+                "event_place": 1,
+                "hillSize": 1,
+                "hillType": 1,
+                "category_code": 1,
+                "session_type": 1,
+                "results_data.results": {
+                    "$filter": {
+                        "input": "$results_data.results",
+                        "as": "athlete",
+                        "cond": {"$in": ["$$athlete.name", names]}
+                    }
+                }
+            }
+        })
+    else:
+        pipeline.append({
+            "$project": {
+                "codex": 1, "raceId": 1, "date": 1, "time": 1, "event_place": 1,
+                "hillSize": 1, "hillType": 1, "category_code": 1, "session_type": 1,
+                "results_data.results": 1
+            }
+        })
+
+    # --- 4. POBRANIE DANYCH Z BAZY ---
+    cursor = db["sessions"].aggregate(pipeline)
     sessions = await cursor.to_list(length=None)
 
     if not sessions:
         return []
 
-    # --- 3. PRZETWARZANIE DANYCH (GRUPOWANIE W PYTHONIE) ---
-    grouped_results = defaultdict(list)
+    # --- 5. IDENTYFIKACJA OSTATNICH 'N' MOŻLIWYCH SKOKÓW (RUND/SERII) ---
+    all_possible_rounds = set()
+    raw_jumps = defaultdict(list)
 
     for session in sessions:
+        codex = session.get("codex")
+        comp_date_str = session.get("date") or "9999-99-99"
+        comp_time_str = session.get("time") or "99:99"
         event_place = session.get("event_place", "")
-        comp_date_str = session.get("date")
 
         results_data = session.get("results_data") or {}
         athletes = results_data.get("results", [])
 
         for athlete in athletes:
             ath_name = athlete.get("name", "")
-
-            # Podwójna weryfikacja nazwiska w Pythonie (częściowe dopasowania)
-            if names:
-                match = any(req_name.lower() in ath_name.lower() for req_name in names)
-                if not match:
-                    continue
-
-            if rank and athlete.get("rank") != rank:
-                continue
-
             jumps = athlete.get("jumps", [])
 
-            # ZBUDOWANIE REKORDU JSON DLA KAŻDEGO SKOKU
             for jump in jumps:
+                round_num = jump.get("round")
+
+                # Unikalny identyfikator konkretnej serii skoków (np. 2 Seria w Zakopanem)
+                round_identifier = (comp_date_str, comp_time_str, codex, round_num)
+                all_possible_rounds.add(round_identifier)
+
                 record = {
-                    "session_id": session.get("_id"),  # Zwróci np. "7555_3185"
-                    "codex": session.get("codex"),
-                    "race_id": session.get("raceId"),  # DODANE dla pełnej jasności
-                    "date": comp_date_str or "9999-99-99",
-                    "time": session.get("time") or "99:99",
+                    "session_id": str(session.get("_id")),
+                    "codex": codex,
+                    "race_id": session.get("raceId"),
+                    "date": comp_date_str,
+                    "time": comp_time_str,
                     "place": event_place,
                     "hill_size": session.get("hillSize"),
                     "hill_type": session.get("hillType"),
                     "category": session.get("category_code"),
                     "session_type": session.get("session_type"),
                     "rank": athlete.get("rank"),
-                    "round": jump.get("round"),
+                    "round": round_num,
                     "distance": jump.get("distance"),
                     "points": jump.get("points"),
                     "jump_rank": jump.get("rank"),
                     "competition_points": athlete.get("competition_points", 0),
                 }
+                raw_jumps[ath_name].append((round_identifier, record))
+
+    # Sortujemy WSZYSTKIE dostępne rundy chronologicznie (od najnowszych)
+    sorted_rounds = sorted(list(all_possible_rounds), key=lambda x: (x[0], x[1], x[3] or 0), reverse=True)
+
+    # Obcinamy do żądanego limitu skoków
+    if limit:
+        allowed_rounds = set(sorted_rounds[:limit])
+    else:
+        allowed_rounds = set(sorted_rounds)
+
+    # --- 6. BUDOWANIE FINALNEJ TABELI TYLKO DLA DOZWOLONYCH SKOKÓW ---
+    grouped_results = defaultdict(list)
+
+    for ath_name, jumps_with_id in raw_jumps.items():
+        for round_id, record in jumps_with_id:
+            # Dodajemy skok zawodnika TYLKO jeśli mieści się w puli najnowszych rund!
+            if round_id in allowed_rounds:
                 grouped_results[ath_name].append(record)
 
-    # --- 4. SORTOWANIE I LIMITOWANIE ---
-        # --- 4. SORTOWANIE I LIMITOWANIE ---
-        for ath_name in grouped_results:
-            # Sortowanie chronologiczne wyników dla każdego zawodnika
-            # Dodajemy 'round' do klucza sortowania. Używamy 'or 0', aby uniknąć błędu
-            # w przypadku braku numeru rundy (None).
-            grouped_results[ath_name].sort(
-                key=lambda x: (x["date"], x["time"], x.get("round") or 0),
-                reverse=True
-            )
+        # Sortowanie wewnątrz samego zawodnika
+        grouped_results[ath_name].sort(
+            key=lambda x: (x["date"], x["time"], x.get("round") or 0),
+            reverse=True
+        )
 
-        # Zastosowanie limitu
-        if limit is not None:
-            grouped_results[ath_name] = grouped_results[ath_name][:limit]
+    final_results = [{"name": ath_name, "jumps": jumps} for ath_name, jumps in grouped_results.items()]
 
-    # --- 5. KONWERSJA NA DOCELOWY FORMAT ---
-    final_results = []
-    for ath_name, jumps in grouped_results.items():
-        final_results.append({
-            "name": ath_name,
-            "jumps": jumps
-        })
+    if names:
+        names_dict = {name: i for i, name in enumerate(names)}
+        final_results.sort(key=lambda x: names_dict.get(x["name"], 999))
 
     return final_results
