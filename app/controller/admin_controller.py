@@ -13,7 +13,8 @@ from app.infrastructure.limiter import limiter
 
 from app.services.scrapers.generate_results import run_scraper_pipeline
 from app.services.scrapers.fis_athletes_scraper import fetch_all_athletes_by_chunks
-from services.athletes_esm_prices import update_esm_prices
+from app.services.athletes_esm_prices import update_esm_prices
+from app.services.scrapers.pdf_training_scraper import process_all_trainings_pdf
 
 router = APIRouter(
     prefix="/admin",
@@ -434,3 +435,36 @@ async def approve_all_session_reviews(request: Request):
         count += 1
 
     return {"message": f"Pomyślnie zatwierdzono {count} zmian w sesjach."}
+
+
+# Na samym dole kontrolera dodaj:
+# ==========================================
+# MODUŁ PDF - TRENINGI I SERIE PRÓBNE (DEBUG)
+# ==========================================
+
+# ==========================================
+# MODUŁ PDF - TRENINGI I SERIE PRÓBNE
+# ==========================================
+@router.post("/refresh-trainings")
+@limiter.limit("5/minute")
+async def extract_trainings_pdf(request: Request):
+    """Przeszukuje bazę, pobiera pliki PDF z treningami i tworzy nowe sesje w MongoDB."""
+    db = request.app.database
+    return await process_all_trainings_pdf(db)
+
+
+# Wymaga importu BaseModel na górze (masz to już zrobione w pliku)
+from pydantic import BaseModel
+from app.services.scrapers.pdf_training_scraper import process_single_pdf_debug
+
+class CheckerRequest(BaseModel):
+    url: str
+    codex: str
+    race_id: str
+
+@router.post("/refresh-trainings-checker")
+async def check_single_training(req: CheckerRequest, request: Request):
+    """Endpoint DEBUG: Sprawdza jeden konkretny PDF i wypluwa krok po kroku jak go zrozumiał."""
+    db = request.app.database
+    result = await process_single_pdf_debug(db, req.url, req.codex, req.race_id)
+    return result
