@@ -4,10 +4,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 
 # Importujemy nasze moduły z poprzednich kroków
-from services.scrapers.scraper import fetch_fis_calendar
-from services.scrapers.event_scraper import fetch_event_details
-from services.scrapers.results_scraper_ind import fetch_race_results as fetch_ind_results
-from services.scrapers.results_scraper_team import fetch_race_results as fetch_team_results
+from app.services.scrapers.scraper import fetch_fis_calendar
+from app.services.scrapers.event_scraper import fetch_event_details
+from app.services.scrapers.results_scraper_ind import fetch_race_results as fetch_ind_results
+from app.services.scrapers.results_scraper_team import fetch_race_results as fetch_team_results
 
 # UWAGA: Ustawienie zbyt dużej liczby wątków (np. 20) szybko skończy się banem IP od FIS.
 # 3-5 workerów to bezpieczny kompromis między szybkością a udawaniem "człowieka".

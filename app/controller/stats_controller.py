@@ -9,7 +9,7 @@ from app.model.SearchRequest import SearchRequest
 from app.model.StandingsRequest import StandingsRequest
 from app.services.stats.search_results import search_athlete_results
 from app.services.stats.generate_standings import generate_standings_from_db
-from services.dictionaries.dictionary_service import DictionaryService, get_dictionary_service
+from app.services.dictionaries.dictionary_service import DictionaryService, get_dictionary_service
 
 router = APIRouter(
     prefix="/stats",

@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from pymongo import UpdateOne
 from datetime import datetime, date
 
-import config
+from app import config
 from app.infrastructure.limiter import limiter
 # from app.auth import verify_api_key # Odkomentuj na produkcji
 
@@ -292,7 +292,8 @@ async def refresh_results(request: Request, payload: RefreshRequest):
 @router.get("/reviews/sessions")
 async def get_pending_session_reviews(request: Request):
     db = request.app.database
-    reviews = await db["sessions_review"].find().to_list(100)
+    # Sortujemy od najnowszych dat, aby świeżo pobrane sesje były na górze listy
+    reviews = await db["sessions_review"].find().sort([("date", -1), ("_id", -1)]).to_list(500)
 
     enriched_reviews = []
     for review in reviews:
@@ -438,6 +439,14 @@ async def approve_all_session_reviews(request: Request):
     return {"message": f"Pomyślnie zatwierdzono {count} zmian w sesjach."}
 
 
+@router.post("/reviews/sessions/reject-all")
+async def reject_all_session_reviews(request: Request):
+    """Odrzuca (usuwa) wszystkie oczekujące sesje z kwarantanny."""
+    db = request.app.database
+    result = await db["sessions_review"].delete_many({})
+    return {"message": f"Pomyślnie odrzucono i usunięto {result.deleted_count} sesji z kwarantanny."}
+
+
 # Na samym dole kontrolera dodaj:
 # ==========================================
 # MODUŁ PDF - TRENINGI I SERIE PRÓBNE (DEBUG)
@@ -446,16 +455,19 @@ async def approve_all_session_reviews(request: Request):
 # ==========================================
 # MODUŁ PDF - TRENINGI I SERIE PRÓBNE
 # ==========================================
+class RefreshTrainingsRequest(BaseModel):
+    season: str = None
+
+
 @router.post("/refresh-trainings")
 @limiter.limit("5/minute")
-async def extract_trainings_pdf(request: Request):
+async def extract_trainings_pdf(request: Request, payload: RefreshTrainingsRequest = None):
     """Przeszukuje bazę, pobiera pliki PDF z treningami i tworzy nowe sesje w MongoDB."""
     db = request.app.database
-    return await process_all_trainings_pdf(db)
+    season = payload.season if payload else None
+    return await process_all_trainings_pdf(db, season=season)
 
 
-# Wymaga importu BaseModel na górze (masz to już zrobione w pliku)
-from pydantic import BaseModel
 from app.services.scrapers.pdf_training_scraper import process_single_pdf_debug
 
 class CheckerRequest(BaseModel):
@@ -475,7 +487,6 @@ import io
 import httpx
 import pdfplumber
 import asyncio
-from pydantic import BaseModel
 
 
 # Model zapytania

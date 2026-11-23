@@ -62,7 +62,7 @@ async def build_global_anchors(db):
 # ==========================================
 # GŁÓWNY SCRAPER (JEDNA PACZKA = 500 SESJI)
 # ==========================================
-async def process_all_trainings_pdf(db):
+async def process_all_trainings_pdf(db, season=None):
     print("▶ Inicjalizacja: Pobieranie pełnej bazy skoczków do zakotwiczenia parsera...")
     global_known_names = await build_global_anchors(db)
     print(f"▶ Sukces: Załadowano {len(global_known_names)} wzorców skoczków z głównej bazy.")
@@ -72,9 +72,11 @@ async def process_all_trainings_pdf(db):
 
     query = {
         "_id": {"$not": {"$regex": "_(TRAINING|TRIAL)", "$options": "i"}},
-        "documents.type": {"$regex": "Results Training|Results Trial", "$options": "i"},
+        "documents.type": {"$regex": "Results.*Training|Training.*Results|Results.*Trial|Official.*Training", "$options": "i"},
         "trainings_processed": {"$ne": True}
     }
+    if season:
+        query["season"] = season
 
     sessions_cursor = db["sessions"].find(query).limit(2000)
     sessions = await sessions_cursor.to_list(None)
@@ -114,8 +116,23 @@ async def process_all_trainings_pdf(db):
 
                 sorted_anchors = sorted(list(local_anchors), key=len, reverse=True)
 
-                response = await client.get(pdf_url)
-                response.raise_for_status()
+                # Pobieranie pliku PDF z ponawianiem (retry do 2 prób)
+                response = None
+                for attempt in range(2):
+                    try:
+                        response = await client.get(pdf_url)
+                        response.raise_for_status()
+                        break
+                    except httpx.HTTPStatusError as http_err:
+                        if attempt == 0 and http_err.response.status_code in [500, 502, 503, 504]:
+                            await asyncio.sleep(1.0)
+                            continue
+                        raise http_err
+                    except httpx.RequestError as req_err:
+                        if attempt == 0:
+                            await asyncio.sleep(1.0)
+                            continue
+                        raise req_err
 
                 if b"%PDF" not in response.content[:10]:
                     return {"success": False, "ignored": True, "reason": "EMPTY", "parent_id": parent_id}
@@ -242,11 +259,22 @@ async def process_all_trainings_pdf(db):
                         break
 
                 if athletes_results:
+                    session_title = f"{doc_type} - {session.get('event_place', '')}"
                     new_session_doc = {
-                        "_id": new_session_id, "codex": codex, "raceId": race_id,
-                        "event_place": session.get("event_place"), "category_code": session.get("category_code"),
-                        "session_type": session_type_str, "date": date_str, "time": start_time,
-                        "hillSize": session.get("hillSize"), "hillType": session.get("hillType"),
+                        "_id": new_session_id,
+                        "codex": codex,
+                        "raceId": race_id,
+                        "title": session_title,
+                        "event_place": session.get("event_place"),
+                        "event_country": session.get("event_country"),
+                        "season": session.get("season"),
+                        "category_code": session.get("category_code"),
+                        "session_type": session_type_str,
+                        "date": date_str,
+                        "time": start_time,
+                        "hillSize": session.get("hillSize"),
+                        "hill_size_unit": session.get("hill_size_unit") or "HS",
+                        "hillType": session.get("hillType"),
                         "results_data": {"results": athletes_results}
                     }
 
@@ -285,7 +313,12 @@ async def process_all_trainings_pdf(db):
         for doc in session.get("documents", []):
             doc_type = doc.get("type", "")
             if doc_type: distinct_doc_types.add(doc_type)
-            if "Results Training" in doc_type or "Results Trial" in doc_type:
+            doc_type_lower = doc_type.lower()
+            is_training_or_trial = (
+                ("training" in doc_type_lower or "trial" in doc_type_lower)
+                and "start list" not in doc_type_lower
+            )
+            if is_training_or_trial:
                 if doc.get("url"):
                     sessions_to_process.append((session, doc))
 
@@ -297,10 +330,14 @@ async def process_all_trainings_pdf(db):
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     successful_parents = set(s["_id"] for s in sessions)
+    failed_parents = {}
     for res in results:
         if isinstance(res, Exception) or not isinstance(res, dict): continue
         if "error" in res:
-            successful_parents.discard(res.get("parent_id"))
+            pid = res.get("parent_id")
+            if pid:
+                successful_parents.discard(pid)
+                failed_parents[pid] = res.get("error")
             results_report.append({"codex": res.get("codex"), "type": res.get("type"), "error": res.get("error")})
             continue
 
@@ -317,6 +354,23 @@ async def process_all_trainings_pdf(db):
         await db["sessions_review"].bulk_write(bulk_ops)
 
     parent_ops = [UpdateOne({"_id": pid}, {"$set": {"trainings_processed": True}}) for pid in successful_parents if pid]
+
+    # Zabezpieczenie przed nieskończoną pętlą: jeśli sesja miała błąd 502/404, zwiększamy licznik prób.
+    # Po 2 nieudanych próbach oznaczamy jako przetworzoną z błędem, aby nie blokowała kolejki.
+    for pid, err in failed_parents.items():
+        parent_ops.append(UpdateOne(
+            {"_id": pid},
+            {
+                "$inc": {"trainings_retry_count": 1},
+                "$set": {"last_training_error": str(err)}
+            }
+        ))
+        # Sprawdzamy czy przekroczyło limit (po aktualizacji lub dla obecnej sesji)
+        parent_ops.append(UpdateOne(
+            {"_id": pid, "trainings_retry_count": {"$gte": 2}},
+            {"$set": {"trainings_processed": True, "trainings_failed": True}}
+        ))
+
     if parent_ops:
         await db["sessions"].bulk_write(parent_ops)
 
