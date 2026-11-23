@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from pymongo import UpdateOne
 from datetime import datetime, date
 
+import config
 from app.infrastructure.limiter import limiter
 # from app.auth import verify_api_key # Odkomentuj na produkcji
 
@@ -427,7 +428,7 @@ async def approve_all_session_reviews(request: Request):
     reviews = await db["sessions_review"].find().to_list(None)
 
     count = 0
-    for review_session in reviews:
+    for review_session in reviews: 
         codex = review_session["_id"]
         review_session.pop("original_checksum", None)
         await db["sessions"].replace_one({"_id": codex}, review_session, upsert=True)
@@ -468,3 +469,81 @@ async def check_single_training(req: CheckerRequest, request: Request):
     db = request.app.database
     result = await process_single_pdf_debug(db, req.url, req.codex, req.race_id)
     return result
+
+
+import io
+import httpx
+import pdfplumber
+import asyncio
+from pydantic import BaseModel
+
+
+# Model zapytania
+class PdfplumberRequest(BaseModel):
+    url: str
+
+
+# Funkcja synchroniczna do parsowania (pdfplumber mocno obciąża procesor)
+def analyze_pdf_with_pdfplumber(pdf_bytes: bytes):
+    results = []
+    # pdfplumber otwiera strumień bajtów bezpośrednio z pamięci RAM
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            page_data = {
+                "page": page_num + 1,
+                "status": "",
+                "tables_found": 0,
+                "extracted_rows": []
+            }
+
+            # Próbujemy wyciągnąć tabele
+            tables = page.extract_tables()
+
+            if len(tables) > 0:
+                page_data["status"] = "ZNALEZIONO TABELE"
+                page_data["tables_found"] = len(tables)
+                # Spłaszczamy tabele do jednej listy wierszy dla łatwiejszego podglądu
+                for table in tables:
+                    for row in table:
+                        page_data["extracted_rows"].append(row)
+            else:
+                page_data["status"] = "BRAK TABEL (pdfplumber widzi to tylko jako zwykły tekst)"
+
+            results.append(page_data)
+
+    return results
+
+
+@router.post("/test-pdfplumber")
+async def test_pdfplumber_endpoint(req: PdfplumberRequest):
+    """
+    Endpoint debugujący. Pobiera PDF z podanego URL i sprawdza,
+    jak pdfplumber widzi w nim tabele.
+    """
+    try:
+        # 1. Pobieramy plik z URL
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            response = await client.get(req.url,headers=config.DEFAULT_HEADERS)
+            response.raise_for_status()
+
+            # Sprawdzamy czy to faktycznie PDF
+            if b"%PDF" not in response.content[:10]:
+                return {"error": "Pobrany plik nie jest prawidłowym dokumentem PDF."}
+
+            pdf_bytes = response.content
+
+        # 2. Odpalamy pdfplumber w osobnym wątku (żeby nie zablokować FastAPI)
+        analysis_result = await asyncio.to_thread(analyze_pdf_with_pdfplumber, pdf_bytes)
+
+        return {
+            "success": True,
+            "url": req.url,
+            "pages_analyzed": len(analysis_result),
+            "results": analysis_result
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
