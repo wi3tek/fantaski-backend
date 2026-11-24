@@ -5,7 +5,7 @@ from typing import List
 
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
-from pymongo import UpdateOne
+from pymongo import UpdateOne, ReplaceOne, DeleteOne
 from datetime import datetime, date
 
 from app import config
@@ -397,46 +397,66 @@ async def reject_athlete_review(request: Request, fis_code: int):
 
 @router.post("/reviews/athletes/approve-all")
 async def approve_all_athlete_reviews(request: Request):
+    """Zatwierdza wszystkich skoczków z kwarantanny za pomocą zoptymalizowanego bulk_write."""
     db = request.app.database
     reviews = await db["athletes_review"].find().to_list(None)
 
-    count = 0
-    for athlete_in_review in reviews:
-        fis_code = athlete_in_review.get("fis_code")
+    if not reviews:
+        return {"message": "Brak skoczków do zatwierdzenia."}
 
-        athlete_in_review.pop("_id", None)
-        reason = athlete_in_review.pop("review_reason", None)
-        athlete_in_review.pop("original_checksum", None)
+    athletes_ops = []
+    review_ids_to_del = []
+
+    for athlete in reviews:
+        fis_code = athlete.get("fis_code")
+        if not fis_code:
+            continue
+
+        athlete.pop("_id", None)
+        reason = athlete.pop("review_reason", None)
+        athlete.pop("original_checksum", None)
 
         if reason == "DELETED":
-            await db["athletes"].delete_one({"fis_code": fis_code})
+            athletes_ops.append(DeleteOne({"fis_code": fis_code}))
         else:
-            await db["athletes"].update_one(
-                {"fis_code": fis_code},
-                {"$set": athlete_in_review},
-                upsert=True
-            )
+            athletes_ops.append(UpdateOne({"fis_code": fis_code}, {"$set": athlete}, upsert=True))
 
-        await db["athletes_review"].delete_one({"fis_code": fis_code})
-        count += 1
+        review_ids_to_del.append(fis_code)
 
-    return {"message": f"Pomyślnie zatwierdzono {count} zmian w bazie skoczków."}
+    if athletes_ops:
+        await db["athletes"].bulk_write(athletes_ops, ordered=False)
+    if review_ids_to_del:
+        await db["athletes_review"].delete_many({"fis_code": {"$in": review_ids_to_del}})
+
+    return {"message": f"Pomyślnie zatwierdzono {len(reviews)} zmian w bazie skoczków."}
 
 
 @router.post("/reviews/sessions/approve-all")
 async def approve_all_session_reviews(request: Request):
+    """Zatwierdza wszystkie sesje z kwarantanny za pomocą zoptymalizowanego bulk_write."""
     db = request.app.database
     reviews = await db["sessions_review"].find().to_list(None)
 
-    count = 0
-    for review_session in reviews: 
+    if not reviews:
+        return {"message": "Brak sesji do zatwierdzenia."}
+
+    sessions_ops = []
+    review_ids_to_del = []
+
+    for review_session in reviews:
         codex = review_session["_id"]
         review_session.pop("original_checksum", None)
-        await db["sessions"].replace_one({"_id": codex}, review_session, upsert=True)
-        await db["sessions_review"].delete_one({"_id": codex})
-        count += 1
+        sessions_ops.append(ReplaceOne({"_id": codex}, review_session, upsert=True))
+        review_ids_to_del.append(codex)
 
-    return {"message": f"Pomyślnie zatwierdzono {count} zmian w sesjach."}
+    if sessions_ops:
+        # Porcjowanie po 1000 operacji dla bezpieczeństwa pamięci
+        batch_size = 1000
+        for i in range(0, len(sessions_ops), batch_size):
+            await db["sessions"].bulk_write(sessions_ops[i:i + batch_size], ordered=False)
+        await db["sessions_review"].delete_many({"_id": {"$in": review_ids_to_del}})
+
+    return {"message": f"Pomyślnie zatwierdzono {len(reviews)} sesji."}
 
 
 @router.post("/reviews/sessions/reject-all")

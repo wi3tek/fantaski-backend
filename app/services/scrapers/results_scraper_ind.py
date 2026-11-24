@@ -1,4 +1,4 @@
-import requests
+import httpx
 from bs4 import BeautifulSoup
 from app import config
 import re
@@ -11,7 +11,7 @@ def fetch_race_results(race_url, session_type="Competition"):
     """
     try:
         print(f"Pobieranie wyników IND z: {race_url}")
-        response = requests.get(race_url, headers=config.DEFAULT_HEADERS)
+        response = httpx.get(race_url, headers=config.DEFAULT_HEADERS, timeout=25.0, follow_redirects=True)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')

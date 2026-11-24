@@ -46,7 +46,7 @@ async def get_standings(request: Request, request_data: StandingsRequest,
 
 # --- NOWE ENDPOINTY BAZY SESJI ---
 @router.post("/sessions")
-@limiter.limit("30/minute")
+@limiter.limit("120/minute")
 async def get_sessions_list(request: Request, filters: SessionSearchFilter):
     """Pobiera przefiltrowaną listę sesji z MongoDB."""
     db = request.app.database
@@ -54,17 +54,19 @@ async def get_sessions_list(request: Request, filters: SessionSearchFilter):
 
     if filters.date_from or filters.date_to:
         query["date"] = {}
-        if filters.date_from: query["date"]["$gte"] = filters.date_from
-        if filters.date_to: query["date"]["$lte"] = filters.date_to
+        if filters.date_from and filters.date_from.strip(): query["date"]["$gte"] = filters.date_from.strip()
+        if filters.date_to and filters.date_to.strip(): query["date"]["$lte"] = filters.date_to.strip()
+        if not query["date"]:
+            del query["date"]
 
-    if filters.session_type:
-        query["session_type"] = {"$regex": filters.session_type, "$options": "i"}
+    if filters.session_type and filters.session_type.strip():
+        query["session_type"] = {"$regex": filters.session_type.strip(), "$options": "i"}
 
-    if filters.category:
-        query["category_code"] = filters.category
+    if filters.category and filters.category.strip():
+        query["category_code"] = filters.category.strip()
 
-    if filters.season:
-        query["season"] = filters.season
+    if filters.season and filters.season.strip():
+        query["season"] = filters.season.strip()
 
     # Pobieramy podstawowe dane, pomijając ciężki obiekt wyników dla optymalizacji listy
     projection = {"results_data": 0}

@@ -1,12 +1,12 @@
-import requests
+import httpx
 from bs4 import BeautifulSoup
 from app import config
 
 
 def fetch_fis_calendar(seasoncode="2026", categorycode="WC", gendercode="M", seasonmonth="X-2026", **kwargs):
-    # 1. Czysty adres bazowy (bez znaków ? i &)
-    endpoint = "/ski-jumping/calendar-results.html"
-    base_url = config.FIS_BASE_URL + endpoint
+    # 1. Czysty adres bazowy (bez podwójnych ukośników)
+    endpoint = "ski-jumping/calendar-results.html"
+    base_url = config.FIS_BASE_URL.rstrip("/") + "/" + endpoint
     # 2. Słownik domyślnych parametrów (odzwierciedla Twój oryginalny link)
     params = {
         "eventselection": "results",
@@ -27,16 +27,13 @@ def fetch_fis_calendar(seasoncode="2026", categorycode="WC", gendercode="M", sea
     # 3. Nadpisanie pustych wartości, jeśli przekazano je w wywołaniu (np. place="Planica")
     params.update(kwargs)
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = config.DEFAULT_HEADERS
 
     try:
-        # Wypisanie docelowego URL dla pewności (requests złoży go automatycznie)
         print(f"Pobieranie danych (Sezon: {params['seasoncode']}, Płeć: {params['gendercode']})...")
 
-        # 4. Magia requests - przekazujemy słownik do 'params'
-        response = requests.get(base_url, headers=headers, params=params)
+        # 4. Asynchroniczno-kompatybilne pobieranie z httpx
+        response = httpx.get(base_url, headers=headers, params=params, timeout=25.0, follow_redirects=True)
         response.raise_for_status()
 
         # Opcjonalnie: podejrzyj wygenerowany URL

@@ -3,7 +3,7 @@ import time
 import fitz
 import requests
 import io
-import config
+from app import config
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from google import genai

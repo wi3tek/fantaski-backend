@@ -4,6 +4,7 @@ from app.controller.admin_controller import router as admin_router
 from app.controller.stats_controller import router as stats_router
 from app.controller.pdf_scraper_controller import router as pdf_router
 from app.controller.hills_controller import router as hills_router
+from app.controller.prediction_controller import router as prediction_router
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.config import settings
@@ -136,4 +137,5 @@ app.include_router(athletes_router)
 app.include_router(stats_router)
 app.include_router(pdf_router, prefix="/api/v1")
 app.include_router(hills_router)
+app.include_router(prediction_router)
 

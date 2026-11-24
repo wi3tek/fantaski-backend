@@ -1,4 +1,4 @@
-import requests
+import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs
 import re
@@ -7,7 +7,7 @@ from app import config
 def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gender=None, mode="IND", categorycode=None,
                         **kwargs):
     endpoint = "general/event-details.html"
-    url = config.FIS_BASE_URL + endpoint
+    url = config.FIS_BASE_URL.rstrip("/") + "/" + endpoint
 
     params = {
         "sectorcode": sectorcode,
@@ -18,7 +18,7 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
 
     try:
         print(f"Pobieranie szczegółów eventu (ID: {eventid})...")
-        response = requests.get(url, headers=config.DEFAULT_HEADERS, params=params)
+        response = httpx.get(url, headers=config.DEFAULT_HEADERS, params=params, timeout=25.0, follow_redirects=True)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -114,9 +114,13 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
                     if not main_codex and doc_codex:
                         main_codex = doc_codex
 
+                    doc_url = doc_link['href']
+                    if "/competition-attachment/" in doc_url and not doc_url.lower().endswith(".pdf"):
+                        doc_url = f"{doc_url}.pdf"
+
                     documents.append({
                         "filename_and_size": doc_name_full,
-                        "url": doc_link['href'],
+                        "url": doc_url,
                         "codex": doc_codex,
                         "type": doc_link.get('data-ga-download'),
                         "gender": doc_gender

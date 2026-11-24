@@ -15,6 +15,69 @@ from app.config import DEFAULT_HEADERS
 # ==========================================
 # FUNKCJE POMOCNICZE (DWA NIEZALEŻNE SILNIKI)
 # ==========================================
+def parse_hill_data_from_pdf_text(text: str) -> dict:
+    """Ekstrahuje parametry skoczni (HS, punkt K, rekord, typ) z tekstu pierwszej strony PDF."""
+    data = {}
+
+    # 1. HILL SIZE (HS) - formaty od 2004 do 2027+
+    hs_match = re.search(
+        r'(?:HILL[\s-]*SIZE(?:\s*\(?HS\)?)?(?:\s*/\s*\(?\s*95%\s*\)?)?|(?<![A-Z])HS)\s*[:]?\s*\n?\s*(\d+(?:\.\d+)?)\s*m',
+        text,
+        re.IGNORECASE
+    )
+    if hs_match:
+        data['size'] = int(float(hs_match.group(1)))
+        data['unit'] = 'HS'
+
+    # 2. PUNKT K (K-POINT)
+    k_match = re.search(
+        r'K[\s-]*POINT\s*[:]?\s*\n?\s*(\d+(?:\.\d+)?)\s*m?',
+        text,
+        re.IGNORECASE
+    )
+    if k_match:
+        data['k_point'] = float(k_match.group(1))
+        if 'size' not in data:
+            data['size'] = int(float(k_match.group(1)))
+            data['unit'] = 'K'
+
+    # 3. METER VALUE
+    mv_match = re.search(
+        r'METER\s*VALUE\s*[:]?\s*\n?\s*(\d+(?:\.\d+)?)\s*(?:points|pts)?',
+        text,
+        re.IGNORECASE
+    )
+    if mv_match:
+        data['meter_value'] = float(mv_match.group(1))
+
+    # 4. REKORD SKOCZNI I REKORDZISTA
+    rec_match = re.search(
+        r'(?:HILL\s*RECORD|WC\s*HILL\s*RECORD)\s*[:]?\s*\n?\s*(\d+(?:\.\d+)?)\s*m',
+        text,
+        re.IGNORECASE
+    )
+    if rec_match:
+        data['record'] = float(rec_match.group(1))
+        rec_idx = rec_match.end()
+        post_text = text[rec_idx:rec_idx + 200]
+        holder_match = re.search(r'\([^\)]*?\d{4}\s+([A-Z\s\.\'-]+?)\s+[A-Z]{3}', post_text)
+        if holder_match:
+            data['record_holder'] = holder_match.group(1).strip()
+
+    # 5. TYP SKOCZNI
+    eff_size = data.get('size', 0)
+    if eff_size >= 185:
+        data['type'] = 'FLYING'
+    elif eff_size >= 110:
+        data['type'] = 'LARGE'
+    elif eff_size >= 85:
+        data['type'] = 'NORMAL'
+    elif eff_size > 0:
+        data['type'] = 'SMALL'
+
+    return data
+
+
 def parse_pdf_content_standard(content):
     """Główny, niezawodny silnik, który poprawnie obsługuje 95% plików (w tym kolumny z HALF.pdf)"""
     pdf_stream = io.BytesIO(content)
@@ -95,6 +158,8 @@ async def process_all_trainings_pdf(db, season=None):
         async with semaphore:
             doc_type = doc.get("type", "")
             pdf_url = doc.get("url")
+            if pdf_url and "/competition-attachment/" in pdf_url and not pdf_url.lower().endswith(".pdf"):
+                pdf_url = f"{pdf_url}.pdf"
             race_id = session.get("raceId", "UNKNOWN")
             codex = session.get("codex", "UNKNOWN")
 
@@ -145,6 +210,7 @@ async def process_all_trainings_pdf(db, season=None):
                                                  ("OPTICAL", parse_pdf_content_optical)]:
                     athletes_results = []  # Resetujemy wyniki dla każdego podejścia
                     full_text = await asyncio.to_thread(parser_func, response.content)
+                    hill_data = parse_hill_data_from_pdf_text(full_text)
 
                     start_time = "12:00"
                     time_match = re.search(r"Start Time:\s*(\d{1,2}:\d{2})", full_text)
@@ -226,13 +292,20 @@ async def process_all_trainings_pdf(db, season=None):
                             continue
 
                         athlete_jumps = []
-                        floats_per_round = len(best_floats) // num_rounds if len(best_floats) > 0 else 0
                         for r in range(num_rounds):
-                            r_floats = best_floats[
-                                r * floats_per_round: (r + 1) * floats_per_round] if floats_per_round > 0 else []
-                            dist = r_floats[1] if len(r_floats) >= 2 else None
-                            pts = r_floats[-1] if len(r_floats) >= 1 else None
-                            status = best_statuses[r] if r < len(best_statuses) else None
+                            base_idx = r * 4
+                            if len(best_floats) >= base_idx + 4:
+                                dist = best_floats[base_idx + 1]
+                                pts = best_floats[base_idx + 3]
+                                status = None
+                            elif len(best_floats) >= base_idx + 2:
+                                dist = best_floats[base_idx + 1]
+                                pts = best_floats[base_idx + 2] if len(best_floats) > base_idx + 2 else None
+                                status = None
+                            else:
+                                dist = None
+                                pts = None
+                                status = best_statuses[r] if r < len(best_statuses) else (best_statuses[0] if best_statuses else "DNS")
 
                             athlete_jumps.append({
                                 "round": round_names[r],
@@ -259,6 +332,11 @@ async def process_all_trainings_pdf(db, season=None):
                         break
 
                 if athletes_results:
+                    effective_hs = session.get("hillSize") or hill_data.get("size")
+                    effective_unit = session.get("hill_size_unit") or hill_data.get("unit") or "HS"
+                    effective_type = session.get("hillType") or hill_data.get("type")
+                    k_point = hill_data.get("k_point")
+
                     session_title = f"{doc_type} - {session.get('event_place', '')}"
                     new_session_doc = {
                         "_id": new_session_id,
@@ -272,11 +350,27 @@ async def process_all_trainings_pdf(db, season=None):
                         "session_type": session_type_str,
                         "date": date_str,
                         "time": start_time,
-                        "hillSize": session.get("hillSize"),
-                        "hill_size_unit": session.get("hill_size_unit") or "HS",
-                        "hillType": session.get("hillType"),
+                        "hillSize": effective_hs,
+                        "hill_size_unit": effective_unit,
+                        "hillType": effective_type,
+                        "k_point": k_point,
                         "results_data": {"results": athletes_results}
                     }
+
+                    # Wzbogacamy istniejącą skocznię w bazie o punkt K, rekord i typ (bez duplikowania wpisów!)
+                    place = session.get("event_place")
+                    if place and effective_hs:
+                        hill_id = f"{place.upper()}_{effective_unit}{effective_hs}"
+                        hill_updates = {}
+                        if k_point: hill_updates["k_point"] = k_point
+                        if hill_data.get("record"): hill_updates["record"] = hill_data["record"]
+                        if hill_data.get("record_holder"): hill_updates["record_holder"] = hill_data["record_holder"]
+                        if effective_type: hill_updates["type"] = effective_type
+                        if hill_updates:
+                            await db_instance["hills"].update_one(
+                                {"_id": hill_id},
+                                {"$set": hill_updates}
+                            )
 
                     doc_to_hash = {k: v for k, v in new_session_doc.items() if k != "_id"}
                     new_checksum = hashlib.md5(json.dumps(doc_to_hash, sort_keys=True).encode('utf-8')).hexdigest()
@@ -394,6 +488,9 @@ async def process_single_pdf_debug(db, pdf_url: str, codex: str, race_id: str):
     global_known_names = await build_global_anchors(db)
     debug_log.append(f"Załadowano {len(global_known_names)} nazwisk z bazy (tylko z full_name).")
     sorted_anchors = sorted(list(global_known_names), key=len, reverse=True)
+
+    if pdf_url and "/competition-attachment/" in pdf_url and not pdf_url.lower().endswith(".pdf"):
+        pdf_url = f"{pdf_url}.pdf"
 
     debug_log.append(f"2. Pobieranie pliku: {pdf_url}")
     async with httpx.AsyncClient(timeout=15.0, headers=DEFAULT_HEADERS, follow_redirects=True) as client:

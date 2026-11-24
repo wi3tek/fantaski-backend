@@ -3,7 +3,7 @@ import uuid
 
 from google import genai
 
-import config
+from app import config
 from app.model.pdf_models import ScraperRequest
 
 # Opcjonalnie: importujemy nasz model danych z serwisu, aby użyć go w response_model
