@@ -1,15 +1,18 @@
 # app/controller/stats_controller.py
-from fastapi import APIRouter, Depends, Request, HTTPException
+import re
+from fastapi import APIRouter, Depends, Request, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional
 
-from app.auth import verify_api_key
+from app.auth import require_role, get_current_user
+from app.services.auth_service import Role
 from app.infrastructure.limiter import limiter
 from app.model.SearchRequest import SearchRequest
 from app.model.StandingsRequest import StandingsRequest
 from app.services.stats.search_results import search_athlete_results
 from app.services.stats.generate_standings import generate_standings_from_db
 from app.services.dictionaries.dictionary_service import DictionaryService, get_dictionary_service
+from app.infrastructure.cache import get_cached_value, set_cached_value
 
 router = APIRouter(
     prefix="/stats",
@@ -30,18 +33,43 @@ class SessionSearchFilter(BaseModel):
 
 # --- ENDPOINTY STATYSTYK ZAWODNIKÓW ---
 @router.post("/search")
-@limiter.limit("10/minute")
-async def search(request: Request, search_data: SearchRequest):
+@limiter.limit("60/minute")
+async def search(
+    request: Request,
+    search_data: SearchRequest,
+    user: dict = Depends(require_role(Role.USER_LITE, Role.USER_PRO, Role.ADMIN))
+):
+    """Zaawansowane statystyki i porównywarka. Konto LITE pozwala na porównanie maksymalnie 2 zawodników."""
+    user_role = user.get("role", Role.USER)
+    if user_role == Role.USER_LITE:
+        names_list = search_data.names or []
+        if len(names_list) > 2:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Konto FantaSKI LITE pozwala na jednoczesne porównanie maksymalnie 2 zawodników. Przejdź na pakiet PRO, aby analizować nielimitowaną liczbę skoczków."
+            )
     db = request.app.database
     return await search_athlete_results(db, **search_data.model_dump())
 
 
 @router.post("/standings")
 @limiter.limit("1000/minute")
-async def get_standings(request: Request, request_data: StandingsRequest,
-                        dictionaries: DictionaryService = Depends(get_dictionary_service)):
+async def get_standings(
+    request: Request,
+    request_data: StandingsRequest,
+    dictionaries: DictionaryService = Depends(get_dictionary_service),
+    user: dict = Depends(get_current_user)
+):
+    """Klasyfikacja generalna i punktacja pucharowa (dostępna dla każdego zalogowanego użytkownika, cache 5 min)."""
+    cache_key = f"standings_{request_data.season}_{request_data.category}"
+    cached = get_cached_value("medium", cache_key)
+    if cached is not None:
+        return cached
+
     db = request.app.database
-    return await generate_standings_from_db(db, request_data.season, request_data.category, dictionaries)
+    result = await generate_standings_from_db(db, request_data.season, request_data.category, dictionaries)
+    set_cached_value("medium", cache_key, result)
+    return result
 
 
 # --- NOWE ENDPOINTY BAZY SESJI ---
@@ -60,7 +88,7 @@ async def get_sessions_list(request: Request, filters: SessionSearchFilter):
             del query["date"]
 
     if filters.session_type and filters.session_type.strip():
-        query["session_type"] = {"$regex": filters.session_type.strip(), "$options": "i"}
+        query["session_type"] = {"$regex": re.escape(filters.session_type.strip()), "$options": "i"}
 
     if filters.category and filters.category.strip():
         query["category_code"] = filters.category.strip()
@@ -105,39 +133,53 @@ async def get_session_details(request: Request, session_id: str):
 @limiter.limit("60/minute")
 async def get_stats_form_data(request: Request):
     """Zwraca słowniki (w tym dynamicznie wygenerowane skocznie, kategorie i sesje) dla wyszukiwarki statystyk."""
+    cached = get_cached_value("medium", "stats_form_data")
+    if cached is not None:
+        return cached
+
     dicts = request.app.state.dicts
 
     # Z całego słownika hills wyciągamy tylko unikalne nazwy miejscowości
     hills_list = dicts.get("hills", [])
     places = sorted(list(set([h["name"] for h in hills_list if h.get("name")])))
 
-    return {
+    result = {
         "places": places,
         "hill_types": dicts.get("hill_type", {}),
-        "categories": dicts.get("categories", {}), # DODANO SŁOWNIK KATEGORII
-        "sessions": dicts.get("sessions", {})      # DODANO SŁOWNIK SESJI
+        "categories": dicts.get("categories", {}),
+        "sessions": dicts.get("sessions", {})
     }
+    set_cached_value("medium", "stats_form_data", result)
+    return result
 
 
 @router.get("/athletes/with-prices")
 @limiter.limit("60/minute")
-async def get_athletes_with_prices(request: Request):
-    """Pobiera listę skoczków z określoną ceną do porównywarki ESM."""
+async def get_athletes_with_prices(
+    request: Request,
+    user: dict = Depends(require_role(Role.USER_PRO, Role.ADMIN))
+):
+    """Pobiera listę skoczków z określoną ceną do porównywarki i narzędzi Fantasy (wymaga FantaSKI PRO, cache 1 min)."""
+    cached = get_cached_value("short", "athletes_with_prices")
+    if cached is not None:
+        return cached
+
     db = request.app.database
 
     # Filtrujemy tylko aktywnych zawodników, którzy mają ustaloną cenę > 0
     cursor = db["athletes"].find(
         {"price": {"$exists": True, "$gt": 0}, "isDisabled": False},
         {"full_name": 1, "fis_code": 1, "price": 1, "_id": 0}
-    ).sort("price", -1)  # -1 oznacza sortowanie malejące (najdrożsi na górze)
+    ).sort("price", -1)
 
     athletes = await cursor.to_list(length=1000)
 
-    # Przemapowujemy klucz na 'name', aby Front-End łatwiej to skonsumował
-    return [
+    result = [
         {
             "name": a.get("full_name"),
             "fis_code": a.get("fis_code"),
             "price": a.get("price")
         } for a in athletes
     ]
+    set_cached_value("short", "athletes_with_prices", result)
+    return result

@@ -1,18 +1,21 @@
 import logging
 import datetime
 from typing import Optional, List, Dict, Any, Union
-from fastapi import APIRouter, Request, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Request, HTTPException, Query, BackgroundTasks, Depends
 from pydantic import BaseModel
 
 from app.infrastructure.limiter import limiter
 from app.services.weather.weather_service import get_weather_service
 from app.services.prediction.neural_network import get_prediction_manager
+from app.auth import require_role
+from app.services.auth_service import Role
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/prediction",
     tags=["Prediction"],
+    dependencies=[Depends(require_role(Role.USER_PRO, Role.ADMIN))]
 )
 
 
@@ -251,8 +254,12 @@ async def _run_retraining_task(db):
 
 @router.post("/retrain")
 @limiter.limit("5/minute")
-async def trigger_retrain(request: Request, background_tasks: BackgroundTasks):
-    """Uruchamia ponowny trening sieci neuronowej w tle."""
+async def trigger_retrain(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    admin: dict = Depends(require_role(Role.ADMIN))
+):
+    """Uruchamia ponowny trening sieci neuronowej w tle (wymaga uprawnień ADMIN)."""
     db = request.app.database
     background_tasks.add_task(_run_retraining_task, db)
     return {"message": "Trening sieci neuronowej został uruchomiony w tle."}

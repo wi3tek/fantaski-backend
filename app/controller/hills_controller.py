@@ -3,10 +3,13 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from pydantic import BaseModel
 
 from app.infrastructure.limiter import limiter
+from app.auth import require_role
+from app.services.auth_service import Role
+from app.infrastructure.cache import get_cached_value, set_cached_value, clear_cache
 
 router = APIRouter(
     prefix="/hills",
@@ -32,9 +35,13 @@ class HillUpdate(BaseModel):
 # --- ENDPOINTY ---
 
 @router.get("/list")
-@limiter.limit("60/minute")
+@limiter.limit("120/minute")
 async def get_all_hills(request: Request):
-    """Pobiera listę wszystkich skoczni z bazy danych."""
+    """Pobiera listę wszystkich skoczni z bazy danych (zoptymalizowana pamięcią podręczną)."""
+    cached = get_cached_value("long", "hills_list")
+    if cached is not None:
+        return cached
+
     db = request.app.database
     hills_col = db["hills"]
 
@@ -45,6 +52,7 @@ async def get_all_hills(request: Request):
     for hill in hills:
         hill["hill_id"] = str(hill.pop("_id"))
 
+    set_cached_value("long", "hills_list", hills)
     return hills
 
 
@@ -64,8 +72,13 @@ async def get_hill(request: Request, hill_id: str):
 
 @router.put("/{hill_id}")
 @limiter.limit("60/minute")
-async def update_hill(request: Request, hill_id: str, payload: HillUpdate):
-    """Aktualizuje (lub tworzy) skocznię — tryb upsert."""
+async def update_hill(
+    request: Request,
+    hill_id: str,
+    payload: HillUpdate,
+    admin: dict = Depends(require_role(Role.ADMIN))
+):
+    """Aktualizuje (lub tworzy) skocznię — tryb upsert (wymaga roli ADMIN)."""
     db = request.app.database
 
     # Budujemy dokument tylko z niepustych pól
@@ -80,6 +93,7 @@ async def update_hill(request: Request, hill_id: str, payload: HillUpdate):
         upsert=True,
     )
 
+    clear_cache("long")
     if result.upserted_id:
         return {"message": f"Utworzono nową skocznię: {hill_id}"}
 
@@ -88,12 +102,17 @@ async def update_hill(request: Request, hill_id: str, payload: HillUpdate):
 
 @router.delete("/{hill_id}")
 @limiter.limit("60/minute")
-async def delete_hill(request: Request, hill_id: str):
-    """Usuwa skocznię z bazy danych."""
+async def delete_hill(
+    request: Request,
+    hill_id: str,
+    admin: dict = Depends(require_role(Role.ADMIN))
+):
+    """Usuwa skocznię z bazy danych (wymaga roli ADMIN)."""
     db = request.app.database
     result = await db["hills"].delete_one({"_id": hill_id})
 
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Nie znaleziono skoczni do usunięcia")
 
+    clear_cache("long")
     return {"message": f"Usunięto skocznię: {hill_id}"}

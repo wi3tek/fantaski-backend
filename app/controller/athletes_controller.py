@@ -3,6 +3,7 @@ from starlette import status
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
+import re
 
 from app.repository.athlete_repository import AthleteRepository, get_athlete_repository
 from app.services.dictionaries.dictionary_service import DictionaryService, get_dictionary_service
@@ -47,7 +48,7 @@ async def get_athletes_list(
     query = {}
 
     if filters.search_name:
-        query["full_name"] = {"$regex": filters.search_name, "$options": "i"}
+        query["full_name"] = {"$regex": re.escape(filters.search_name), "$options": "i"}
 
     if filters.countries:
         query["country_code"] = {"$in": filters.countries}

@@ -1,19 +1,63 @@
 from pathlib import Path
+from typing import List
+import json
 from pydantic_settings import BaseSettings
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 class Settings(BaseSettings):
-    MONGO_URL: str
-    MONGO_DB_NAME: str
+    # MongoDB
+    MONGO_URL: str = "mongodb://localhost:27017/"
+    MONGO_DB_NAME: str = "FIS_DATA_DB"
+
+    # Authentication & Security
+    JWT_SECRET: str = "change-me-to-a-very-long-random-secret-in-production-123456789"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    GOOGLE_CLIENT_ID: str = ""
+    INITIAL_ADMIN_EMAIL: str = ""
+
+    # External APIs
+    GEMINI_API_KEY: str = ""
+    CONFIG_EMAIL: str = ""
+    CONFIG_PASS: str = ""
+    ESM_AUTH_URL: str = "https://esmdomainserviceproduction.azurewebsites.net/users/auth"
+    ESM_DATA_URL: str = "https://esmdomainserviceproduction.azurewebsites.net/players/clientData/5f7f6aeb9ed6e90012549269"
+
+    # AI Model
+    AI_MODEL: str = "gemini-2.5-pro"
+
+    # CORS & Web
+    CORS_ORIGINS: str = "http://localhost:5173,http://localhost:4173,http://127.0.0.1:5173,http://127.0.0.1:4173"
+
+    # Environment & Dev security
+    ENVIRONMENT: str = "development"
+    ENABLE_DEV_LOGIN: bool = True
+
+    # Legacy basic auth users
+    API_USERS_RAW: str = '{}'
 
     class Config:
         env_file = str(BASE_DIR / ".env")
+        env_file_encoding = "utf-8"
+        extra = "ignore"
 
-# Instancja ustawień, z której będziesz korzystać w aplikacji
+# Instancja ustawień, z której korzysta aplikacja
 settings = Settings()
 
-GEMINI_API_KEY = ""
+# Backwards compatibility aliases
+GEMINI_API_KEY = settings.GEMINI_API_KEY
+CONFIG_EMAIL = settings.CONFIG_EMAIL
+CONFIG_PASS = settings.CONFIG_PASS
+ESM_AUTH_URL = settings.ESM_AUTH_URL
+ESM_DATA_URL = settings.ESM_DATA_URL
+AI_MODEL = settings.AI_MODEL
+INITIAL_ADMIN_EMAIL = settings.INITIAL_ADMIN_EMAIL
+
+try:
+    API_USERS = json.loads(settings.API_USERS_RAW)
+except Exception:
+    API_USERS = {}
 
 FIS_BASE_URL = "https://www.fis-ski.com/DB/"
 
@@ -39,25 +83,11 @@ SUPER_TEAM_POINTS = {
 }
 
 # --- FILTRY ---
-# Wykluczane zawsze (niezależnie od trybu)
 EXCLUDED_TITLES_GLOBAL = [
     "Overall Standings"
 ]
 
-# Prefiksy oznaczające zawody drużynowe
 TEAM_COMPETITION_PREFIXES = [
     "Super Team",
     "Team"
 ]
-
-
-API_USERS = {
-    "fantaski2": "supersekret123"
-}
-
-AI_MODEL = "gemini-2.5-pro"
-
-CONFIG_EMAIL = "qsc71138@kisoq.com"
-CONFIG_PASS = "q!sVcB7fgR131H3jkQ8"
-ESM_AUTH_URL = "https://esmdomainserviceproduction.azurewebsites.net/users/auth"
-ESM_DATA_URL = "https://esmdomainserviceproduction.azurewebsites.net/players/clientData/5f7f6aeb9ed6e90012549269"

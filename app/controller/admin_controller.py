@@ -3,14 +3,15 @@ import json
 import hashlib
 from typing import List
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from pydantic import BaseModel
 from pymongo import UpdateOne, ReplaceOne, DeleteOne
 from datetime import datetime, date
 
 from app import config
 from app.infrastructure.limiter import limiter
-# from app.auth import verify_api_key # Odkomentuj na produkcji
+from app.auth import require_role
+from app.services.auth_service import Role
 
 from app.services.scrapers.generate_results import run_scraper_pipeline
 from app.services.scrapers.fis_athletes_scraper import fetch_all_athletes_by_chunks
@@ -20,7 +21,7 @@ from app.services.scrapers.pdf_training_scraper import process_all_trainings_pdf
 router = APIRouter(
     prefix="/admin",
     tags=["Admin"],
-    # dependencies=[Depends(verify_api_key)]
+    dependencies=[Depends(require_role(Role.ADMIN))]
 )
 
 
