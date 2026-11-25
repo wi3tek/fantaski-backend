@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 import asyncio
 from pymongo import UpdateOne
 from app import config
+from app.services.scrapers.http_client import safe_get
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
@@ -54,8 +55,8 @@ def scrape_fis_code(name: str, surname: str, ioc_code: str) -> str:
         f"&gendercode=M&birthyear=&skiclub=&skis=&nationcode={safe_ioc}&fiscode=&status=O&search=true"
     )
 
-    response = httpx.get(search_url, headers=DEFAULT_HEADERS, timeout=10)
-    if response.status_code != 200:
+    response = safe_get(search_url, timeout=15.0)
+    if not response or response.status_code != 200:
         return None
 
     soup = BeautifulSoup(response.text, 'html.parser')

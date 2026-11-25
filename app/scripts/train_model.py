@@ -12,17 +12,19 @@ from app.services.prediction.neural_network import get_prediction_manager
 
 async def main():
     print("=" * 60)
-    print("🧠 TRENOWANIE SIECI NEURONOWEJ DO PREDYKCJI SKOKÓW FIS")
+    print("🧠 TRENOWANIE SIECI NEURONOWEJ DO PREDYKCJI SKOKÓW FIS (v3 — 14 cech)")
     print("=" * 60)
     
     start_time = time.time()
+    db_name = sys.argv[1] if len(sys.argv) > 1 else (settings.MONGO_DB_NAME if settings.MONGO_DB_NAME != "FIS_DATA_DB_DEV" else "FIS_DATA_DB_TEST")
+    print(f"Używana baza danych: {db_name}")
     client = AsyncIOMotorClient(settings.MONGO_URL)
-    db = client[settings.MONGO_DB_NAME]
+    db = client[db_name]
     
     print("Pobieranie sesji z MongoDB...")
     cursor = db["sessions"].find(
         {"results_data.results": {"$exists": True, "$ne": []}},
-        {"date": 1, "time": 1, "hillSize": 1, "hillType": 1, "event_place": 1, "session_type": 1, "race_category": 1, "category_code": 1, "results_data": 1}
+        {"date": 1, "time": 1, "hillSize": 1, "hillType": 1, "event_place": 1, "session_type": 1, "race_category": 1, "category_code": 1, "results_data": 1, "weather": 1}
     )
     
     sessions = await cursor.to_list(length=3500)

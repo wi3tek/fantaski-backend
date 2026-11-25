@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import datetime
 from typing import Optional, List, Dict, Any, Union
@@ -7,6 +8,7 @@ from pydantic import BaseModel
 from app.infrastructure.limiter import limiter
 from app.services.weather.weather_service import get_weather_service
 from app.services.prediction.neural_network import get_prediction_manager
+from app.services.prediction.calendar_service import get_next_upcoming_competition
 from app.auth import require_role
 from app.services.auth_service import Role
 
@@ -30,6 +32,10 @@ class WeatherPayload(BaseModel):
     relative_humidity: float = 75.0
     precipitation: float = 0.0
     headwind_component: float = 0.5
+    wind_trend_slope: Optional[float] = 0.0
+    wind_volatility_index: Optional[float] = None
+    temperature_drift: Optional[float] = 0.0
+    direction_shift: Optional[float] = 0.0
 
 
 class PredictionRequest(BaseModel):
@@ -37,6 +43,7 @@ class PredictionRequest(BaseModel):
     hill_size: float = 130.0
     hill_type: str = "LARGE"  # NORMAL, LARGE, FLYING
     hill_id: Optional[str] = None
+    competition_type: Optional[str] = "WC"  # WC, GP, COC, FC
     date: Optional[str] = None
     time: Optional[str] = "15:00"
     weather: Optional[WeatherPayload] = None
@@ -45,6 +52,22 @@ class PredictionRequest(BaseModel):
 
 
 # --- ENDPOINTY ---
+
+@router.get("/next-competition")
+@limiter.limit("60/minute")
+async def get_next_competition(
+    request: Request,
+    category: str = Query("WC", description="Kategoria zawodów (WC, GP, COC)"),
+    gender: str = Query("M", description="Płeć (M lub W)"),
+    force_refresh: bool = Query(False, description="Wymuś pobranie z serwerów FIS")
+):
+    """
+    Automatycznie wykrywa i podpowiada najbliższe nadchodzące zawody (np. Ruka, Wisła)
+    wraz z datą, godziną, parametrami skoczni i statusem kwalifikacji na bazie kalendarza FIS.
+    """
+    db = request.app.database
+    return await get_next_upcoming_competition(db, target_category=category, gender=gender, force_refresh=force_refresh)
+
 
 @router.get("/weather")
 @limiter.limit("60/minute")
@@ -63,12 +86,39 @@ async def get_hill_weather(
 @limiter.limit("60/minute")
 async def get_available_athletes(request: Request):
     """
-    Zwraca listę aktywnych skoczków wraz z parametrem ceny (price) i flagą Pucharu Świata,
-    używaną przez selektor i listę startową.
+    Zwraca listę aktywnych skoczków wraz z parametrem ceny (price), flagą Pucharu Świata
+    oraz informacją, czy zawodnik punktował w AKTUALNYM sezonie (TOP 30 w konkursie).
     """
     db = request.app.database
     manager = get_prediction_manager()
     wc_set = manager.feature_extractor.wc_athletes_fis
+
+    # Znajdź zawodników, którzy zdobyli punkty (TOP 30) w bieżącym sezonie zimowym
+    scored_set = set()
+    try:
+        cursor_lat = db["sessions"].find({"date": {"$ne": None}}).sort("date", -1).limit(1)
+        lat_list = await cursor_lat.to_list(1)
+        if lat_list:
+            latest_date = str(lat_list[0].get("date") or "2026-11-22")
+            season_year = int(latest_date[:4])
+            month = int(latest_date[5:7]) if len(latest_date) >= 7 else 11
+            winter_start = f"{season_year}-11-01" if month >= 10 else f"{season_year-1}-11-01"
+
+            comp_sessions = await db["sessions"].find({
+                "date": {"$gte": winter_start},
+                "session_type": "COMPETITION",
+                "results_data.results": {"$exists": True, "$ne": []}
+            }, {"results_data.results": 1}).to_list(100)
+
+            for s in comp_sessions:
+                for r in s.get("results_data", {}).get("results", []):
+                    try:
+                        if 1 <= int(r.get("rank", 999)) <= 30 and r.get("fis_code"):
+                            scored_set.add(str(r["fis_code"]).strip())
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.warning(f"Błąd podczas wyliczania punktujących w bieżącym sezonie: {e}")
 
     athletes = await db["athletes"].find({"status": "Active"}).sort("full_name", 1).to_list(1500)
 
@@ -82,7 +132,8 @@ async def get_available_athletes(request: Request):
             "country_code": a.get("country_code", ""),
             "price": price_val,
             "has_price": price_val is not None,
-            "has_wc": code_str in wc_set
+            "has_wc": code_str in wc_set,
+            "scored_current_season": code_str in scored_set
         })
 
     return result
@@ -181,20 +232,28 @@ async def predict_competition(
                 {"fis_code": {"$in": str_codes}}
             ]
         }
-        athletes = await athletes_col.find(query).to_list(1000)
+        raw_athletes = await athletes_col.find(query).to_list(1000)
+        # Zachowaj dokładną kolejność wyjścia na belkę podaną przez użytkownika / listę startową
+        code_to_ath = {str(a.get("fis_code")): a for a in raw_athletes}
+        for c in payload.fis_codes:
+            str_c = str(c).strip()
+            if str_c in code_to_ath:
+                athletes.append(code_to_ath[str_c])
     else:
-        # NOWOŚĆ: Domyślnie aktywni skoczkowie z polem price != None!
+        # Domyślnie aktywni skoczkowie z wyceną:
+        # W Pucharze Świata zawodnicy o niższym rankingu/cenie skaczą na początku, a liderzy na końcu
         query = {
             "status": "Active",
             "price": {"$ne": None}
         }
-        athletes = await athletes_col.find(query).sort("price", -1).to_list(500)
+        athletes = await athletes_col.find(query).sort("price", 1).to_list(500)
 
         # Fallback jeśli brak wycenionych
         if not athletes:
             athletes = await athletes_col.find({"status": "Active"}).limit(100).to_list(100)
 
     # 5. Uruchom inferencję sieci neuronowej
+    target_tier = (payload.competition_type or "WC").upper().strip()
     try:
         predictions = manager.predict(
             athletes=athletes,
@@ -204,11 +263,18 @@ async def predict_competition(
             weather=weather_dict,
             target_date=target_date,
             weekend_sessions=weekend_sessions,
-            num_simulations=payload.num_simulations
+            num_simulations=payload.num_simulations,
+            target_category=target_tier
         )
     except Exception as e:
         logger.error(f"Błąd podczas generowania predykcji: {e}")
         raise HTTPException(status_code=500, detail=f"Błąd sieci neuronowej: {str(e)}")
+
+    volatility_val = weather_dict.get("wind_volatility_index")
+    if volatility_val is None:
+        spd = float(weather_dict.get("wind_speed", 1.5))
+        gst = float(weather_dict.get("wind_gusts", spd * 1.5))
+        volatility_val = round(max(0.0, (gst - spd) / max(0.5, spd)), 2)
 
     return {
         "hill": {
@@ -217,7 +283,15 @@ async def predict_competition(
             "type": payload.hill_type,
             "id": payload.hill_id
         },
+        "competition_type": target_tier,
         "weather": weather_dict,
+        "corridor": {
+            "wind_volatility_index": float(volatility_val),
+            "lottery_risk_level": weather_dict.get("lottery_risk_level", "HIGH" if volatility_val >= 0.85 else ("MODERATE" if volatility_val >= 0.35 else "LOW")),
+            "wind_trend_slope": float(weather_dict.get("wind_trend_slope", 0.0)),
+            "temperature_drift": float(weather_dict.get("temperature_drift", 0.0)),
+            "direction_shift": float(weather_dict.get("direction_shift", 0.0)),
+        },
         "weekend_sessions_detected": weekend_sessions_info,
         "total_athletes": len(predictions),
         "predictions": predictions,
@@ -228,27 +302,30 @@ async def predict_competition(
 @router.get("/model-info")
 @limiter.limit("60/minute")
 async def get_model_info(request: Request):
-    """Zwraca aktualny stan i metryki sieci neuronowej."""
+    """Zwraca aktualny stan, postęp treningu i metryki sieci neuronowej."""
     manager = get_prediction_manager()
     return {
         "is_trained": manager.is_trained,
         "model_path": str(manager.model is not None),
         "metadata": manager.metadata,
+        "training_status": manager.get_training_status(),
         "tracked_athletes_count": len(manager.feature_extractor.athlete_history),
         "wc_athletes_count": len(manager.feature_extractor.wc_athletes_fis)
     }
 
 
 async def _run_retraining_task(db):
+    manager = get_prediction_manager()
     try:
-        manager = get_prediction_manager()
+        manager.training_message = "Pobieranie sesji z bazy MongoDB..."
         cursor = db["sessions"].find(
             {"results_data.results": {"$exists": True, "$ne": []}},
-            {"date": 1, "time": 1, "hillSize": 1, "hillType": 1, "event_place": 1, "session_type": 1, "race_category": 1, "category_code": 1, "results_data": 1}
+            {"date": 1, "time": 1, "hillSize": 1, "hillType": 1, "event_place": 1, "session_type": 1, "race_category": 1, "category_code": 1, "results_data": 1, "weather": 1}
         )
-        sessions = await cursor.to_list(length=3500)
-        manager.train(sessions)
+        sessions = await cursor.to_list(length=5000)
+        await asyncio.to_thread(manager.train, sessions)
     except Exception as e:
+        manager.mark_training_failed(str(e))
         logger.error(f"Błąd zadania w tle trenowania modelu: {e}")
 
 
@@ -260,6 +337,11 @@ async def trigger_retrain(
     admin: dict = Depends(require_role(Role.ADMIN))
 ):
     """Uruchamia ponowny trening sieci neuronowej w tle (wymaga uprawnień ADMIN)."""
+    manager = get_prediction_manager()
+    if manager.is_training:
+        raise HTTPException(status_code=400, detail="Trening sieci neuronowej jest już w toku.")
+
     db = request.app.database
+    manager.mark_training_started()
     background_tasks.add_task(_run_retraining_task, db)
     return {"message": "Trening sieci neuronowej został uruchomiony w tle."}

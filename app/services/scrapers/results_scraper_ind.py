@@ -1,6 +1,7 @@
 import httpx
 from bs4 import BeautifulSoup
 from app import config
+from app.services.scrapers.http_client import safe_get
 import re
 import traceback
 
@@ -11,8 +12,9 @@ def fetch_race_results(race_url, session_type="Competition"):
     """
     try:
         print(f"Pobieranie wyników IND z: {race_url}")
-        response = httpx.get(race_url, headers=config.DEFAULT_HEADERS, timeout=25.0, follow_redirects=True)
-        response.raise_for_status()
+        response = safe_get(race_url, timeout=25.0)
+        if not response:
+            return None
 
         soup = BeautifulSoup(response.text, 'html.parser')
 

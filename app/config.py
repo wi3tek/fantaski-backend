@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import List
 import json
@@ -5,10 +6,24 @@ from pydantic_settings import BaseSettings
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+APP_ENV = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "dev")).lower()
+if APP_ENV == "test":
+    env_file_path = str(BASE_DIR / ".env.test") if (BASE_DIR / ".env.test").exists() else str(BASE_DIR / ".env")
+    default_db_name = "FIS_DATA_DB_TEST"
+    default_env = "test"
+elif APP_ENV in ["prod", "production"]:
+    env_file_path = str(BASE_DIR / ".env.prod") if (BASE_DIR / ".env.prod").exists() else str(BASE_DIR / ".env")
+    default_db_name = "FIS_DATA_DB_PROD"
+    default_env = "production"
+else:
+    env_file_path = str(BASE_DIR / ".env.dev") if (BASE_DIR / ".env.dev").exists() else str(BASE_DIR / ".env")
+    default_db_name = "FIS_DATA_DB_DEV"
+    default_env = "development"
+
 class Settings(BaseSettings):
     # MongoDB
     MONGO_URL: str = "mongodb://localhost:27017/"
-    MONGO_DB_NAME: str = "FIS_DATA_DB"
+    MONGO_DB_NAME: str = default_db_name
 
     # Authentication & Security
     JWT_SECRET: str = "change-me-to-a-very-long-random-secret-in-production-123456789"
@@ -31,14 +46,14 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:4173,http://127.0.0.1:5173,http://127.0.0.1:4173"
 
     # Environment & Dev security
-    ENVIRONMENT: str = "development"
+    ENVIRONMENT: str = default_env
     ENABLE_DEV_LOGIN: bool = True
 
     # Legacy basic auth users
     API_USERS_RAW: str = '{}'
 
     class Config:
-        env_file = str(BASE_DIR / ".env")
+        env_file = env_file_path
         env_file_encoding = "utf-8"
         extra = "ignore"
 

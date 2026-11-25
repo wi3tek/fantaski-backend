@@ -71,7 +71,7 @@ async def enrich_hills(apply: bool = False):
     for k in place_size_to_docs:
         place_size_to_docs[k].sort(key=lambda x: x[0])
 
-    semaphore = asyncio.Semaphore(10)
+    semaphore = asyncio.Semaphore(2)
     enriched_count = 0
     k_fallback_count = 0
     not_found_count = 0
@@ -92,7 +92,12 @@ async def enrich_hills(apply: bool = False):
 
                 for _, dtype, url in doc_entries[:3]:
                     try:
+                        await asyncio.sleep(0.5)
                         r = await http_client.get(url)
+                        if r.status_code == 429:
+                            await asyncio.sleep(4.0)
+                            r = await http_client.get(url)
+
                         if b"%PDF" in r.content[:10]:
                             doc = fitz.open(stream=r.content, filetype="pdf")
                             txt = doc[0].get_text("text")

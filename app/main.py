@@ -81,6 +81,16 @@ def load_dictionaries():
 # --- FRAGMENT: Cykl życia aplikacji (Lifespan) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Potwierdzenie profilu środowiskowego w konsoli startowej
+    env_name = settings.ENVIRONMENT.upper()
+    env_badge = "🧪 TEST" if env_name in ["TEST", "TESTING"] else ("🚀 PROD" if env_name in ["PROD", "PRODUCTION"] else "🛠️ DEV")
+    print("\n" + "=" * 65)
+    print(f"🎿  FantaSKI Backend API  |  Aktywny profil: {env_badge}")
+    print(f"🗄️   Baza danych MongoDB:   {settings.MONGO_DB_NAME}")
+    print(f"🌐  Środowisko:            {settings.ENVIRONMENT}")
+    print(f"🔐  Logowanie dev-login:   {'WŁĄCZONE (tylko dev/test)' if settings.ENABLE_DEV_LOGIN else 'WYŁĄCZONE (bezpieczne)'}")
+    print("=" * 65 + "\n")
+
     # Uruchamiane przy starcie aplikacji (optymalizacja puli połączeń dla darmowych klastrów Atlas M0)
     app.mongodb_client = AsyncIOMotorClient(
         settings.MONGO_URL,
@@ -89,7 +99,7 @@ async def lifespan(app: FastAPI):
         serverSelectionTimeoutMS=5000
     )
     app.database = app.mongodb_client[settings.MONGO_DB_NAME]
-    print("Połączono z MongoDB!")
+    print(f"Połączono z MongoDB! [Baza: {settings.MONGO_DB_NAME}]")
 
     # Indeksy w bazie dla użytkowników
     try:

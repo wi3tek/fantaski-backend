@@ -1,5 +1,4 @@
 # fis_athletes_scraper.py
-import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qs
 import time
@@ -8,6 +7,7 @@ import re
 from typing import List, Dict
 import os
 from datetime import datetime
+from app.services.scrapers.http_client import safe_get
 
 # --- Konfiguracja ---
 BASE_URL = "https://www.fis-ski.com"
@@ -61,22 +61,25 @@ def parse_athlete_row(a_tag) -> Dict:
 
     birthdate_div = a_tag.select_one(".hidden-sm-down .g-lg-2, .g-lg-2.justify-right")
     if birthdate_div:
-        birthdate = birthdate_div.text.strip()
-        birthdate = "01-01-" + birthdate if len(birthdate) == 4 else birthdate
-
-        try:
-            if birthdate and len(birthdate) > 0:
-                data["birthdate"] = datetime.strptime(birthdate, "%d-%m-%Y")
-            else:
-                data["birthdate"] = None
-        except ValueError as e:
-            # Wypisujemy dokładną informację, co spowodowało błąd
-            print(f"\n[KRYTYCZNY BŁĄD DATY] Przerwano działanie scrapera!")
-            print(f"Zawartość zmiennej 'birthdate': '{birthdate}'")
-
-            # Rzucamy wyjątek dalej. Spowoduje to przerwanie skryptu
-            # i wyświetlenie pełnego tracebacku (drzewa wywołań)
-            raise e
+        birthdate_str = birthdate_div.text.strip()
+        parsed_dt = None
+        if birthdate_str:
+            for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d"):
+                try:
+                    parsed_dt = datetime.strptime(birthdate_str, fmt)
+                    break
+                except ValueError:
+                    pass
+            if not parsed_dt and len(birthdate_str) == 4 and birthdate_str.isdigit():
+                try:
+                    parsed_dt = datetime(int(birthdate_str), 1, 1)
+                except ValueError:
+                    pass
+        data["birthdate"] = parsed_dt
+        if parsed_dt:
+            data["birth_year"] = str(parsed_dt.year)
+        else:
+            data["birth_year"] = birthdate_str if len(birthdate_str) == 4 else None
     else:
         mobile_year = a_tag.select_one(".hidden-md-up .g-sm-3, .hidden-md-up .g-xs-6")
         data["birth_year"] = mobile_year.text.strip() if mobile_year else None
@@ -127,11 +130,8 @@ def fetch_chunk(birthyear: str, limit: int = DEFAULT_LIMIT, offset: int = 0, hea
         "limit": str(limit),
         "offset": str(offset),
     }
-    try:
-        resp = requests.get(AJAX_BASE, headers=headers, params=params, timeout=20)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"Request error for offset={offset}: {e}")
+    resp = safe_get(AJAX_BASE, headers=headers, params=params, timeout=20.0)
+    if not resp or not resp.text:
         return []
 
     return parse_fragment_html(resp.text)

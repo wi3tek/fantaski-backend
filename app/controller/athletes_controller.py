@@ -27,7 +27,9 @@ def subtract_years(dt: datetime, years: int) -> datetime:
 class AthleteSearchFilter(BaseModel):
     search_name: Optional[str] = None
     countries: Optional[List[str]] = []
-    status: Optional[str] = None
+    status: Optional[str] = "ACTIVE"  # Domyślnie aktywni
+    seasons: Optional[List[str]] = []  # Sezony, w których skoczek startował
+    categories: Optional[List[str]] = []  # Rodzaje zawodów (WC, COC, GP itd.)
     age_min: Optional[int] = None
     age_max: Optional[int] = None
     sort_by: Optional[str] = "full_name"  # Domyślne pole sortowania
@@ -59,6 +61,24 @@ async def get_athletes_list(
         elif filters.status == "INACTIVE":
             query["status"] = {"$ne": "Active"}
 
+    # Filtr sezonów oraz rodzajów zawodów na bazie historii konkursów w 'sessions'
+    session_match = {}
+    if filters.seasons:
+        session_match["season"] = {"$in": filters.seasons}
+    if filters.categories:
+        session_match["category_code"] = {"$in": filters.categories}
+
+    if session_match:
+        matching_fis_codes = await db["sessions"].distinct("results_data.results.fis_code", session_match)
+        int_codes = set()
+        for code in matching_fis_codes:
+            if code is not None:
+                try:
+                    int_codes.add(int(code))
+                except (ValueError, TypeError):
+                    pass
+        query["fis_code"] = {"$in": list(int_codes)}
+
     if filters.age_min is not None or filters.age_max is not None:
         now = datetime.utcnow()
         birthdate_query = {}
@@ -87,6 +107,30 @@ async def get_athletes_list(
         athlete["flagUrl"] = dictionaries.get_flag_url(athlete.get("country_code"))
 
     return athletes
+
+
+@router.get("/filters-meta")
+async def get_athletes_filters_meta(request: Request):
+    """Zwraca listę dostępnych sezonów i kategorii zawodów do filtrów w bazie skoczków."""
+    db = request.app.database
+    seasons = await db["sessions"].distinct("season", {"season": {"$ne": None}})
+    sorted_seasons = sorted([str(s) for s in seasons if s], key=lambda x: str(x), reverse=True)
+
+    categories = [
+        {"code": "WC", "name": "Puchar Świata (PŚ)"},
+        {"code": "COC", "name": "Puchar Kontynentalny (CoC)"},
+        {"code": "GP", "name": "Letnie Grand Prix (LGP)"},
+        {"code": "FC", "name": "FIS Cup"},
+        {"code": "OWG", "name": "Igrzyska Olimpijskie (IO)"},
+        {"code": "SFWC", "name": "MŚ w Lotach (MŚwL)"},
+        {"code": "WSC", "name": "Mistrzostwa Świata (MŚ)"},
+        {"code": "WJC", "name": "MŚ Juniorów (MŚJ)"},
+    ]
+
+    return {
+        "seasons": sorted_seasons,
+        "categories": categories
+    }
 
 
 @router.get("/countries")
@@ -131,3 +175,26 @@ async def get_all_athletes(
 @router.get("/names")
 async def get_names(repo: AthleteRepository = Depends(get_athlete_repository)):
     return await repo.get_all_names()
+
+
+@router.get("/{fis_code}/stats")
+async def get_athlete_stats(
+    fis_code: int,
+    request: Request,
+    dictionaries: DictionaryService = Depends(get_dictionary_service)
+):
+    """
+    Pobiera zaawansowane statystyki kariery zawodnika:
+    - Podsumowanie (zwycięstwa, podia, top 10, starty)
+    - Formę na poszczególnych rodzajach skoczni (Mamucie / Duże / Normalne)
+    - Ostatnie występy
+    """
+    from app.services.athlete_service import get_athlete_full_metrics
+    db = request.app.database
+    metrics = await get_athlete_full_metrics(db, fis_code, dictionaries)
+    if not metrics:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Nie znaleziono zawodnika o fis_code: {fis_code}"
+        )
+    return metrics

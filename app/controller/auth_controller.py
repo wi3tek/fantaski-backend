@@ -25,6 +25,10 @@ class DevLoginRequest(BaseModel):
 class UpdateRoleRequest(BaseModel):
     role: str
 
+class UpdateProfileRequest(BaseModel):
+    name: Optional[str] = None
+    picture: Optional[str] = None
+
 class UserResponse(BaseModel):
     id: str
     email: str
@@ -119,6 +123,53 @@ async def dev_login(req: DevLoginRequest, request: Request):
 async def get_my_profile(current_user: dict = Depends(get_current_user)):
     """Pobiera dane zalogowanego użytkownika i jego aktualną rolę."""
     return serialize_user(current_user)
+
+@router.put("/me")
+async def update_my_profile(
+    req: UpdateProfileRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
+    """Aktualizacja profilu zalogowanego użytkownika (nazwa / imię, avatar)."""
+    db = request.app.database
+    user_id = current_user.get("_id")
+    update_data = {}
+
+    if req.name is not None:
+        trimmed_name = req.name.strip()
+        if len(trimmed_name) < 2 or len(trimmed_name) > 60:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Nazwa użytkownika musi mieć od 2 do 60 znaków."
+            )
+        update_data["name"] = trimmed_name
+
+    if req.picture is not None:
+        trimmed_pic = req.picture.strip()
+        update_data["picture"] = trimmed_pic
+
+    if not update_data:
+        return {
+            "user": serialize_user(current_user)
+        }
+
+    await db["users"].update_one({"_id": ObjectId(user_id)}, {"$set": update_data})
+    current_user.update(update_data)
+
+    token_payload = {
+        "sub": str(current_user["_id"]),
+        "email": current_user["email"],
+        "name": current_user["name"],
+        "picture": current_user.get("picture", ""),
+        "role": current_user.get("role", Role.USER)
+    }
+    new_token = create_access_token(token_payload)
+
+    return {
+        "access_token": new_token,
+        "token_type": "bearer",
+        "user": serialize_user(current_user)
+    }
 
 @router.get("/users")
 async def list_users(

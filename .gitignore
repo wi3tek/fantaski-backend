@@ -1,10 +1,117 @@
-.venv/
-__pycache__/
-*.pyc
-*.pyo
-.idea/
-FIScraper.iml
+# ==============================================================================
+# FantaSKI Backend - .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Środowisko, Secrety i Poświadczenia (BEZPIECZEŃSTWO)
+# ------------------------------------------------------------------------------
 .env
-.env.local
-*.json
-env.example
+.env.*
+*.env
+!.env.example
+!env.example
+
+# Klucze prywatne, certyfikaty SSL i magazyny kluczy
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+*.pub
+
+# Pliki poświadczeń chmurowych i kont usługowych
+*credentials*.json
+client_secret*.json
+service-account*.json
+gcp-*.json
+firebase-*.json
+google-services*.json
+
+# Tokeny autoryzacyjne i zrzuty sesji
+*.token
+auth_token*
+session_*.json
+
+# Lokalne bazy danych i zrzuty danych
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.rdb
+
+# ------------------------------------------------------------------------------
+# 2. Wirtualne środowiska Python i pakiety
+# ------------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Bytecode Python i pamięć podręczna
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Pakiety dystrybucyjne i build
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Pamięć podręczna testów i linterów
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# ------------------------------------------------------------------------------
+# 3. Scrapery, pobrane pliki PDF, zrzuty wyników i cache ML
+# ------------------------------------------------------------------------------
+# Pobrane załączniki PDF FIS
+*.pdf
+downloaded_pdfs/
+downloads/
+temp/
+tmp/
+output/
+results/
+logs/
+*.log
+
+# Duże lokalne stany modeli ML (pliki o rozmiarze 20MB+)
+app/model_weights/feature_extractor_state.json
+*.ckpt
+*.safetensors
+
+# Pliki tymczasowe i zrzuty testowe
+result.json
+results.json
+app/result.json
+app/results.json
+*.jsonl
+
+# ------------------------------------------------------------------------------
+# 4. Pliki edytorów IDE i systemowe
+# ------------------------------------------------------------------------------
+.idea/
+.vscode/
+!.vscode/extensions.json
+FIScraper.iml
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+*.bak
+*.tmp

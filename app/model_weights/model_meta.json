@@ -1,0 +1,10 @@
+{
+  "trained_at": "2026-11-25T10:26:22.795267",
+  "num_sessions": 700,
+  "num_samples": 29837,
+  "epochs": 50,
+  "best_val_loss": 0.0045,
+  "mae_distance_meters_approx": 9.05,
+  "input_dim": 14,
+  "model_architecture": "SkiJumpingNN(14->64->32->1, PhysicsPoints)"
+}

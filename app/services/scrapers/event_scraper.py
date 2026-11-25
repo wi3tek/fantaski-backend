@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs
 import re
 from app import config
+from app.services.scrapers.http_client import safe_get
 
 def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gender=None, mode="IND", categorycode=None,
                         **kwargs):
@@ -18,8 +19,9 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
 
     try:
         print(f"Pobieranie szczegółów eventu (ID: {eventid})...")
-        response = httpx.get(url, headers=config.DEFAULT_HEADERS, params=params, timeout=25.0, follow_redirects=True)
-        response.raise_for_status()
+        response = safe_get(url, params=params, timeout=25.0)
+        if not response:
+            return []
 
         soup = BeautifulSoup(response.text, 'html.parser')
         rows = soup.find_all('div', class_='table-row')
@@ -134,8 +136,8 @@ def fetch_event_details(sectorcode="JP", eventid="", seasoncode="", filter_gende
 
         return results
 
-    except requests.exceptions.RequestException as e:
-        print(f"Błąd sieci: {e}")
+    except Exception as e:
+        print(f"Błąd sieci podczas pobierania szczegółów eventu: {e}")
         return []
 
 

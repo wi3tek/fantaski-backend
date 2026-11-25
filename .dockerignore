@@ -1,0 +1,56 @@
+# ==============================================================================
+# FantaSKI Backend - .dockerignore
+# Zapobiega wstrzykiwaniu wrażliwych plików i zbędnych megabajtów do obrazu Docker
+# ==============================================================================
+
+# System kontroli wersji
+.git/
+.gitignore
+
+# Pliki środowiskowe i klucze (KRYTYCZNE DLA BEZPIECZEŃSTWA!)
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.cert
+*.crt
+*credentials*.json
+client_secret*.json
+service-account*.json
+
+# Wirtualne środowiska lokalne i cache Pythona
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Pamięć podręczna testów
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Pliki środowisk IDE
+.idea/
+.vscode/
+FIScraper.iml
+
+# Pliki scraperów, logi i zrzuty
+*.pdf
+downloaded_pdfs/
+downloads/
+temp/
+tmp/
+output/
+results/
+logs/
+*.log
+result.json
+app/result.json
+app/model_weights/feature_extractor_state.json
+
+# Dokumentacja i pliki robocze
+README.md

@@ -1,12 +1,15 @@
 # app/controller/admin_controller.py
-import json
-import hashlib
-from typing import List
+import io
+import asyncio
+from typing import List, Optional
+from datetime import datetime
 
-from fastapi import APIRouter, Request, HTTPException, Depends
+from fastapi import APIRouter, Request, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from pymongo import UpdateOne, ReplaceOne, DeleteOne
-from datetime import datetime, date
+
+import httpx
+import pdfplumber
 
 from app import config
 from app.infrastructure.limiter import limiter
@@ -14,9 +17,16 @@ from app.auth import require_role
 from app.services.auth_service import Role
 
 from app.services.scrapers.generate_results import run_scraper_pipeline
+from app.services.scrapers.results_job_manager import (
+    generate_full_checksum,
+    get_results_job_manager,
+    save_scraped_events_to_db,
+)
 from app.services.scrapers.fis_athletes_scraper import fetch_all_athletes_by_chunks
 from app.services.athletes_esm_prices import update_esm_prices
-from app.services.scrapers.pdf_training_scraper import process_all_trainings_pdf
+from app.services.scrapers.pdf_training_scraper import process_all_trainings_pdf, process_single_pdf_debug
+from app.services.weather.weather_enricher import get_weather_enricher
+from app.services.scrapers.nightly_batch_scraper import get_nightly_batch_scraper
 
 router = APIRouter(
     prefix="/admin",
@@ -31,30 +41,283 @@ class RefreshRequest(BaseModel):
     seasons: List[str]
     categories: List[str]
     mode: str = "IND"
+    only_missing: bool = True
 
 
-# --- FUNKCJE POMOCNICZE ---
-
-def json_serial(obj):
-    """Zabezpieczenie parsowania dat dla json.dumps"""
-    if isinstance(obj, (datetime, date)):
-        return obj.isoformat()
-    raise TypeError(f"Type {type(obj)} not serializable")
-
-
-def generate_full_checksum(data: dict) -> str:
-    """Tworzy deterministyczny hash ignorując klucze systemowe."""
-    clean_data = {k: v for k, v in data.items() if
-                  k not in ["_id", "checksum", "original_checksum", "last_checked", "review_reason"]}
-    json_string = json.dumps(clean_data, sort_keys=True, ensure_ascii=False, default=json_serial)
-    return hashlib.md5(json_string.encode('utf-8')).hexdigest()
+class RetryMissingRequest(BaseModel):
+    season: Optional[str] = None
+    only_429: bool = False
 
 
 # --- ENDPOINTY ---
 
+CATEGORY_LABELS = {
+    "WC": "Puchar Świata",
+    "GP": "Letnie Grand Prix",
+    "COC": "Puchar Kontynentalny",
+    "FC": "FIS Cup",
+    "OWG": "Igrzyska Olimpijskie",
+    "WSC": "Mistrzostwa Świata",
+    "SFWC": "MŚ w Lotach",
+    "WJC": "MŚ Juniorów",
+    "FESA": "Puchar OPA / FESA"
+}
+
 @router.get("/config")
 async def get_admin_config(request: Request):
     return {"categories": request.app.state.dicts.get("categories", {})}
+
+
+@router.get("/seasons-summary")
+async def get_seasons_summary(request: Request):
+    """
+    Zwraca szczegółowe zestawienie wszystkich wgranych sezonów i kategorii w bazie danych:
+    - Liczbę pobranych sesji i sesji z wynikami
+    - Procent i status kompletności (COMPLETE, PARTIAL, EMPTY)
+    - Kategorie i miejscowości w każdym sezonie
+    - Datę ostatniej aktualizacji / scrapowania
+    """
+    db = request.app.database
+    pipeline = [
+        {"$match": {"season": {"$ne": None}}},
+        {
+            "$group": {
+                "_id": {
+                    "season": "$season",
+                    "category": "$category_code"
+                },
+                "total_sessions": {"$sum": 1},
+                "sessions_with_results": {
+                    "$sum": {
+                        "$cond": [
+                            {
+                                "$and": [
+                                    {"$isArray": "$results_data.results"},
+                                    {"$gt": [{"$size": "$results_data.results"}, 0]}
+                                ]
+                            },
+                            1,
+                            0
+                        ]
+                    }
+                },
+                "cancelled_sessions": {
+                    "$sum": {
+                        "$cond": [
+                            {
+                                "$and": [
+                                    {
+                                        "$or": [
+                                            {"$eq": ["$is_cancelled", True]},
+                                            {"$eq": ["$results_data.is_cancelled", True]}
+                                        ]
+                                    },
+                                    {
+                                        "$or": [
+                                            {"$not": ["$results_data.results"]},
+                                            {"$eq": [{"$size": {"$ifNull": ["$results_data.results", []]}}, 0]}
+                                        ]
+                                    }
+                                ]
+                            },
+                            1,
+                            0
+                        ]
+                    }
+                },
+                "failed_429_sessions": {
+                    "$sum": {
+                        "$cond": [{"$eq": ["$scrape_status", "FAILED_429"]}, 1, 0]
+                    }
+                },
+                "places": {"$addToSet": "$event_place"},
+                "min_date": {"$min": "$date"},
+                "max_date": {"$max": "$date"},
+                "last_checked": {"$max": "$last_checked"}
+            }
+        },
+        {"$sort": {"_id.season": -1, "_id.category": 1}}
+    ]
+
+    records = await db["sessions"].aggregate(pipeline).to_list(None)
+
+    seasons_map = {}
+    for r in records:
+        season = r["_id"]["season"]
+        cat_code = r["_id"]["category"] or "INNE"
+        total = r["total_sessions"]
+        with_res = r["sessions_with_results"]
+        cancelled = r.get("cancelled_sessions", 0)
+        failed_429 = r.get("failed_429_sessions", 0)
+        missing = max(0, total - with_res - cancelled)
+        places = [p for p in r.get("places", []) if p]
+
+        # Kompletność uwzględnia sesje rozegrane oraz odwołane (bo one też są kompletnie obsłużone)
+        cat_pct = round(((with_res + cancelled) / total) * 100) if total > 0 else 0
+
+        cat_info = {
+            "category_code": cat_code,
+            "category_name": CATEGORY_LABELS.get(cat_code, cat_code),
+            "total_sessions": total,
+            "sessions_with_results": with_res,
+            "cancelled_sessions": cancelled,
+            "missing_sessions": missing,
+            "failed_429_sessions": failed_429,
+            "completeness_pct": cat_pct,
+            "places_count": len(places),
+            "places": sorted(places),
+            "min_date": r.get("min_date"),
+            "max_date": r.get("max_date"),
+            "last_checked": r.get("last_checked").isoformat() if r.get("last_checked") else None
+        }
+
+        if season not in seasons_map:
+            seasons_map[season] = {
+                "season": season,
+                "total_sessions": 0,
+                "sessions_with_results": 0,
+                "cancelled_sessions": 0,
+                "missing_sessions": 0,
+                "failed_429_sessions": 0,
+                "categories": [],
+                "places_set": set(),
+                "last_checked": None
+            }
+
+        s_obj = seasons_map[season]
+        s_obj["total_sessions"] += total
+        s_obj["sessions_with_results"] += with_res
+        s_obj["cancelled_sessions"] += cancelled
+        s_obj["missing_sessions"] += missing
+        s_obj["failed_429_sessions"] += failed_429
+        s_obj["categories"].append(cat_info)
+        s_obj["places_set"].update(places)
+
+        lc = r.get("last_checked")
+        if lc and (not s_obj["last_checked"] or lc > s_obj["last_checked"]):
+            s_obj["last_checked"] = lc
+
+    result = []
+    for s_code, s_data in sorted(seasons_map.items(), key=lambda x: str(x[0]), reverse=True):
+        total = s_data["total_sessions"]
+        with_res = s_data["sessions_with_results"]
+        cancelled = s_data["cancelled_sessions"]
+        missing = s_data["missing_sessions"]
+        failed_429 = s_data["failed_429_sessions"]
+        pct = round(((with_res + cancelled) / total) * 100) if total > 0 else 0
+
+        if total == 0 or (with_res == 0 and cancelled == 0):
+            status_str = "EMPTY"
+        elif missing == 0:
+            status_str = "COMPLETE"
+        else:
+            status_str = "PARTIAL"
+
+        result.append({
+            "season": s_code,
+            "total_sessions": total,
+            "sessions_with_results": with_res,
+            "cancelled_sessions": cancelled,
+            "missing_sessions": missing,
+            "failed_429_sessions": failed_429,
+            "completeness_pct": pct,
+            "status": status_str,
+            "unique_places_count": len(s_data["places_set"]),
+            "categories": s_data["categories"],
+            "last_checked": s_data["last_checked"].isoformat() if s_data["last_checked"] else None
+        })
+
+    return {
+        "total_seasons": len(result),
+        "total_seasons_in_db": len(result),
+        "seasons": result
+    }
+
+
+@router.get("/seasons-summary/{season}/missing")
+async def get_season_missing_sessions(request: Request, season: str):
+    """
+    Zwraca szczegółową listę sesji w danym sezonie, które nie mają kompletnych wyników:
+    - Odwołane przez jury (np. wiatr/pogoda)
+    - Brakujące w bazie lub oznaczone błędem 429 do wznowienia
+    """
+    db = request.app.database
+    cursor = db["sessions"].find({
+        "season": season,
+        "$or": [
+            {"results_data.results": {"$in": [None, []]}},
+            {"results_data": None},
+            {"results_data.results": {"$exists": False}},
+            {"is_cancelled": True},
+            {"results_data.is_cancelled": True}
+        ]
+    }).sort([("date", 1), ("_id", 1)])
+
+    missing_list = []
+    cancelled_list = []
+    failed_429_count = 0
+
+    async for doc in cursor:
+        results_arr = (doc.get("results_data") or {}).get("results", [])
+        has_results = bool(results_arr and len(results_arr) > 0)
+        is_cancelled = bool(
+            (doc.get("is_cancelled") is True or (doc.get("results_data") or {}).get("is_cancelled") is True)
+            and not has_results
+        )
+
+        if has_results:
+            continue
+
+        scrape_status = doc.get("scrape_status")
+        is_429 = scrape_status == "FAILED_429"
+        if not is_cancelled and is_429:
+            failed_429_count += 1
+
+        if is_cancelled:
+            status_val = "CANCELLED"
+            status_label = "Odwołane przez jury (wiatr / pogoda)"
+        elif is_429:
+            status_val = "FAILED_429"
+            status_label = "Limit FIS (429) — do wznowienia"
+        else:
+            status_val = "MISSING"
+            status_label = "Brak wyników w bazie (do pobrania)"
+
+        item = {
+            "id": doc.get("_id"),
+            "codex": doc.get("codex"),
+            "race_id": doc.get("raceId"),
+            "date": doc.get("date"),
+            "time": doc.get("time"),
+            "place": doc.get("event_place", "Nieznane"),
+            "country": doc.get("event_country", ""),
+            "hill_size": doc.get("hillSize"),
+            "hill_unit": doc.get("hill_size_unit", "HS"),
+            "title": doc.get("title", "Konkurs"),
+            "category_code": doc.get("category_code"),
+            "category_name": CATEGORY_LABELS.get(doc.get("category_code", ""), doc.get("category_code")),
+            "race_url": doc.get("raceUrl"),
+            "is_cancelled": is_cancelled,
+            "scrape_status": scrape_status,
+            "scrape_error": doc.get("scrape_error"),
+            "status": status_val,
+            "status_label": status_label
+        }
+
+        if is_cancelled:
+            cancelled_list.append(item)
+        else:
+            missing_list.append(item)
+
+    return {
+        "season": season,
+        "total_unresolved": len(missing_list) + len(cancelled_list),
+        "missing_count": len(missing_list),
+        "failed_429_count": failed_429_count,
+        "cancelled_count": len(cancelled_list),
+        "missing_sessions": missing_list,
+        "cancelled_sessions": cancelled_list
+    }
 
 
 @router.post("/update-prices")
@@ -196,94 +459,144 @@ async def refresh_athletes(request: Request, payload: RefreshAthletesRequest):
         return {"message": "Analiza skoczków zakończona", "stats": stats, "esmPricesData": prices_result}
 
 
+async def _run_refresh_results_background(db, seasons: List[str], categories: List[str], mode: str, only_missing: bool):
+    manager = get_results_job_manager()
+    await manager.run_results_scrape(db, seasons, categories, mode=mode, only_missing=only_missing)
+
+
+async def _run_retry_missing_background(db, season: Optional[str], only_429: bool):
+    manager = get_results_job_manager()
+    await manager.run_retry_missing(db, season=season, only_429=only_429)
+
+
+@router.get("/refresh-results/status")
+@limiter.limit("120/minute")
+async def get_refresh_results_status(request: Request):
+    """Zwraca bieżący postęp zadania scrapowania lub wznawiania brakujących sesji."""
+    return get_results_job_manager().get_status()
+
+
+@router.post("/refresh-results/start")
+@limiter.limit("30/minute")
+async def start_refresh_results(
+    request: Request,
+    payload: RefreshRequest,
+    background_tasks: BackgroundTasks
+):
+    """Uruchamia pobieranie wyników FIS w tle z bieżącym raportowaniem postępu."""
+    manager = get_results_job_manager()
+    if manager.is_running:
+        raise HTTPException(status_code=400, detail="Zadanie scrapowania wyników jest już w toku.")
+
+    db = request.app.database
+    total_combos = len(payload.seasons) * len(payload.categories)
+    manager.mark_started("scrape", total_combinations=total_combos)
+    background_tasks.add_task(
+        _run_refresh_results_background,
+        db=db,
+        seasons=payload.seasons,
+        categories=payload.categories,
+        mode=payload.mode,
+        only_missing=payload.only_missing,
+    )
+    return {"message": "Scrapowanie wyników zostało uruchomione w tle.", "total_combinations": total_combos}
+
+
+@router.post("/retry-missing/start")
+@limiter.limit("30/minute")
+async def start_retry_missing(
+    request: Request,
+    payload: RetryMissingRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Uruchamia szybkie dociąganie WYŁĄCZNIE brakujących sesji / błędów 429 bezpośrednio z bazy
+    (bez ponownego przeszukiwania kalendarzy i kompletnych eventów na serwerach FIS).
+    """
+    manager = get_results_job_manager()
+    if manager.is_running:
+        raise HTTPException(status_code=400, detail="Zadanie scrapowania wyników jest już w toku.")
+
+    db = request.app.database
+    manager.mark_started("retry_missing", total_combinations=1)
+    background_tasks.add_task(
+        _run_retry_missing_background,
+        db=db,
+        season=payload.season,
+        only_429=payload.only_429,
+    )
+    return {
+        "message": f"Uruchomiono dociąganie brakujących sesji (sezon: {payload.season or 'wszystkie'}).",
+        "season": payload.season,
+        "only_429": payload.only_429,
+    }
+
+
+@router.post("/refresh-results/stop")
+@limiter.limit("30/minute")
+async def stop_refresh_results(request: Request):
+    """Bezpiecznie zatrzymuje aktywne zadanie scrapowania wyników."""
+    manager = get_results_job_manager()
+    if not manager.is_running:
+        return {"message": "Żadne zadanie scrapowania nie jest obecnie aktywne."}
+    manager.stop()
+    return {"message": "Wysłano sygnał zatrzymania scrapowania."}
+
+
 @router.post("/refresh-results")
 @limiter.limit("100/minute")
 async def refresh_results(request: Request, payload: RefreshRequest):
     db = request.app.database
-    sessions_col = db["sessions"]
-    review_col = db["sessions_review"]
-    hills_col = db["hills"]
+    manager = get_results_job_manager()
+    stats = {
+        "inserted": 0,
+        "sent_to_review": 0,
+        "unchanged": 0,
+        "skipped_complete": 0,
+        "recovered_missing": 0,
+        "failed_429": 0,
+        "combinations_processed": 0,
+    }
 
-    stats = {"inserted": 0, "sent_to_review": 0, "unchanged": 0, "combinations_processed": 0}
-    hill_ops_dict = {}
+    existing_complete_ids = set()
+    existing_event_ids_by_session: Dict[str, Optional[str]] = {}
+    complete_event_ids = set()
+    if payload.only_missing:
+        existing_complete_ids, existing_event_ids_by_session, complete_event_ids = await manager._build_complete_sets(
+            db, payload.seasons, payload.categories
+        )
 
     for season in payload.seasons:
         for category in payload.categories:
             stats["combinations_processed"] += 1
-            scraped_events = run_scraper_pipeline(
-                seasoncode=season,
-                categorycode=category,
-                gendercode="M",
-                limit_events=None,
-                mode=payload.mode
-            )
+            try:
+                scraped_events = await asyncio.to_thread(
+                    run_scraper_pipeline,
+                    seasoncode=season,
+                    categorycode=category,
+                    gendercode="M",
+                    limit_events=None,
+                    mode=payload.mode,
+                    existing_complete_ids=existing_complete_ids if payload.only_missing else None,
+                    existing_complete_event_ids=complete_event_ids if payload.only_missing else None,
+                )
+            except Exception as e:
+                print(f"⚠️ Błąd podczas pobierania kombinacji (Sezon={season}, Kategoria={category}): {e}")
+                continue
 
             if not scraped_events:
                 continue
 
-            for event in scraped_events:
-                place = event.get("place", "UNKNOWN")
-                country = event.get("country", "UNKNOWN")
-
-                for session in event.get("sessions", []):
-                    hill_size = session.get('hillSize', 0)
-
-                    # POPRAWKA: Prawidłowy fallback! Jeśli .get() zwróci None, operator 'or' wymusi 'HS'
-                    hill_unit = session.get('hill_size_unit') or 'HS'
-
-                    # Budujemy unikalny hill_id uwzględniając jednostkę skoczni
-                    if hill_size:
-                        hill_id = f"{place.upper()}_{hill_unit}{hill_size}"
-                        hill_ops_dict[hill_id] = UpdateOne(
-                            {"_id": hill_id},
-                            {"$set": {
-                                "place": place,
-                                "country_code": country,
-                                "size": hill_size,
-                                "unit": hill_unit,
-                                "type": session.get("hillType")
-                            }},
-                            upsert=True
-                        )
-
-                    codex = session.get("codex")
-                    race_id = session.get("raceId")
-
-                    if not codex or not race_id:
-                        continue
-
-                    session_composite_id = f"{race_id}_{codex}"
-
-                    session["event_place"] = place
-                    session["event_country"] = country
-                    session["season"] = season
-                    session["category_code"] = category
-
-                    # Generowanie sumy kontrolnej
-                    current_hash = generate_full_checksum(session)
-                    session["checksum"] = current_hash
-                    session["last_checked"] = datetime.utcnow()
-
-                    existing_session = await sessions_col.find_one({"_id": session_composite_id})
-
-                    if not existing_session:
-                        session["_id"] = session_composite_id
-                        await sessions_col.insert_one(session)
-                        stats["inserted"] += 1
-                    else:
-                        existing_hash = generate_full_checksum(existing_session)
-                        if existing_hash == current_hash:
-                            await sessions_col.update_one({"_id": session_composite_id},
-                                                          {"$set": {"last_checked": datetime.utcnow()}})
-                            stats["unchanged"] += 1
-                        else:
-                            session["_id"] = session_composite_id
-                            session["original_checksum"] = existing_hash
-                            await review_col.update_one({"_id": session_composite_id}, {"$set": session}, upsert=True)
-                            stats["sent_to_review"] += 1
-
-    if hill_ops_dict:
-        await hills_col.bulk_write(list(hill_ops_dict.values()))
+            batch_stats = await save_scraped_events_to_db(
+                db=db,
+                scraped_events=scraped_events,
+                season=season,
+                category=category,
+                only_missing=payload.only_missing,
+                existing_event_ids_by_session=existing_event_ids_by_session if payload.only_missing else None,
+            )
+            for k in ("inserted", "sent_to_review", "unchanged", "skipped_complete", "recovered_missing", "failed_429"):
+                stats[k] += batch_stats.get(k, 0)
 
     return {"message": "Pobieranie wariantów zakończone", "stats": stats}
 # ==========================================
@@ -489,8 +802,6 @@ async def extract_trainings_pdf(request: Request, payload: RefreshTrainingsReque
     return await process_all_trainings_pdf(db, season=season)
 
 
-from app.services.scrapers.pdf_training_scraper import process_single_pdf_debug
-
 class CheckerRequest(BaseModel):
     url: str
     codex: str
@@ -502,12 +813,6 @@ async def check_single_training(req: CheckerRequest, request: Request):
     db = request.app.database
     result = await process_single_pdf_debug(db, req.url, req.codex, req.race_id)
     return result
-
-
-import io
-import httpx
-import pdfplumber
-import asyncio
 
 
 # Model zapytania
@@ -579,3 +884,171 @@ async def test_pdfplumber_endpoint(req: PdfplumberRequest):
             "success": False,
             "error": str(e)
         }
+
+
+# =====================================================================
+# MODUŁ WZBOGACANIA POGODĄ & NOCNEGO PRZETWARZANIA BAZY (BATCH SCRAPE)
+# =====================================================================
+
+class EnrichWeatherRequest(BaseModel):
+    target: str = "all"  # "all" (DEV + TEST), "dev", "test", "current"
+    force: bool = False
+
+class NightlyScrapeRequest(BaseModel):
+    seasons: Optional[List[str]] = None
+    categories: Optional[List[str]] = None
+    delay_seconds: float = 1.8
+    mode: str = "IND"
+
+
+async def _run_weather_enrichment_task(db_client, target: str, force: bool):
+    enricher = get_weather_enricher()
+    try:
+        if target in ["all", "both"]:
+            # 1. TEST najpierw (szybka weryfikacja)
+            db_test = db_client["FIS_DATA_DB_TEST"]
+            await enricher.enrich_database(db_test, force=force)
+            # 2. DEV (pełna baza)
+            if not enricher.stop_requested:
+                db_dev = db_client["FIS_DATA_DB_DEV"]
+                await enricher.enrich_database(db_dev, force=force)
+        elif target == "test":
+            db_test = db_client["FIS_DATA_DB_TEST"]
+            await enricher.enrich_database(db_test, force=force)
+        elif target == "dev":
+            db_dev = db_client["FIS_DATA_DB_DEV"]
+            await enricher.enrich_database(db_dev, force=force)
+        else:
+            db_cur = db_client[config.settings.MONGO_DB_NAME]
+            await enricher.enrich_database(db_cur, force=force)
+    except Exception as e:
+        print(f"Błąd zadania w tle wzbogacania pogody: {e}")
+
+
+async def _run_nightly_scrape_background(db, seasons: List[str], categories: List[str], delay_seconds: float, mode: str):
+    scraper = get_nightly_batch_scraper()
+    await scraper.run_nightly_scrape(db, seasons, categories, delay_seconds=delay_seconds, mode=mode)
+
+
+@router.get("/weather-status")
+@limiter.limit("60/minute")
+async def get_weather_enrichment_status(request: Request):
+    """Zwraca stan pokrycia bazy danymi pogodowymi dla profilu DEV oraz TEST oraz live status enrichera."""
+    client = getattr(request.app, "mongodb_client", None) or getattr(request.app, "db_client", None)
+    enricher = get_weather_enricher()
+
+    if client is not None:
+        stats_dev = await enricher.get_db_stats(client["FIS_DATA_DB_DEV"])
+        stats_test = await enricher.get_db_stats(client["FIS_DATA_DB_TEST"])
+    else:
+        db = getattr(request.app, "database", None)
+        cur_stats = await enricher.get_db_stats(db) if db is not None else {}
+        stats_dev = cur_stats
+        stats_test = cur_stats
+
+    return {
+        "status": enricher.get_status(),
+        "dev": stats_dev,
+        "test": stats_test,
+        "active_env": config.APP_ENV,
+        "active_db": config.settings.MONGO_DB_NAME
+    }
+
+
+@router.post("/enrich-weather/start")
+@limiter.limit("10/minute")
+async def start_weather_enrichment(
+    request: Request,
+    payload: EnrichWeatherRequest,
+    background_tasks: BackgroundTasks
+):
+    """Uruchamia w tle wzbogacanie sesji historycznych o dane pogodowe z Open-Meteo Archive API."""
+    enricher = get_weather_enricher()
+    if enricher.is_running:
+        raise HTTPException(status_code=400, detail="Zadanie wzbogacania bazy pogodą jest już w toku.")
+
+    client = getattr(request.app, "mongodb_client", None) or getattr(request.app, "db_client", None)
+    background_tasks.add_task(_run_weather_enrichment_task, client, payload.target, payload.force)
+
+    return {
+        "message": f"Wzbogacanie bazy pogodą zostało uruchomione w tle (cel: {payload.target.upper()}).",
+        "target": payload.target,
+        "force": payload.force
+    }
+
+
+@router.post("/enrich-weather/stop")
+@limiter.limit("10/minute")
+async def stop_weather_enrichment(request: Request):
+    """Zatrzymuje trwające zadanie wzbogacania bazy pogodą."""
+    enricher = get_weather_enricher()
+    if not enricher.is_running:
+        return {"message": "Żadne zadanie wzbogacania bazy nie jest obecnie aktywne."}
+
+    enricher.stop()
+    return {"message": "Wysłano sygnał bezpiecznego zatrzymania wzbogacania."}
+
+
+@router.get("/nightly-scrape/status")
+@limiter.limit("60/minute")
+async def get_nightly_scrape_status(request: Request):
+    """Zwraca bieżący stan nocnego przetwarzania bazy."""
+    scraper = get_nightly_batch_scraper()
+    return scraper.get_status()
+
+
+@router.post("/nightly-scrape/start")
+@limiter.limit("10/minute")
+async def start_nightly_scrape(
+    request: Request,
+    payload: NightlyScrapeRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Uruchamia nocne powolne przetwarzanie (batch scrape) ze sztucznym opóźnieniem chroniącym przed kodem 429.
+    Automatycznie wzbogaca każdą sesję o historyczne dane pogodowe z Open-Meteo.
+    """
+    scraper = get_nightly_batch_scraper()
+    if scraper.is_running:
+        raise HTTPException(status_code=400, detail="Nocne przetwarzanie bazy jest już w toku.")
+
+    db = request.app.database
+
+    # Domyślnie wszystkie dostępne sezony z kalendarza lub bazy
+    seasons = payload.seasons
+    if not seasons or len(seasons) == 0:
+        db_seasons = await db["sessions"].distinct("season")
+        if db_seasons:
+            seasons = sorted(db_seasons, reverse=True)
+        else:
+            seasons = [str(y) for y in range(2026, 1999, -1)]
+
+    categories = payload.categories or ["WC", "GP", "COC", "FC"]
+
+    background_tasks.add_task(
+        _run_nightly_scrape_background,
+        db=db,
+        seasons=seasons,
+        categories=categories,
+        delay_seconds=payload.delay_seconds,
+        mode=payload.mode
+    )
+
+    return {
+        "message": f"Nocne przetwarzanie zostało uruchomione w tle ({len(seasons)} sezonów, {len(categories)} kategorii).",
+        "seasons_count": len(seasons),
+        "categories": categories,
+        "delay_seconds": payload.delay_seconds
+    }
+
+
+@router.post("/nightly-scrape/stop")
+@limiter.limit("10/minute")
+async def stop_nightly_scrape(request: Request):
+    """Bezpiecznie zatrzymuje nocne przetwarzanie bazy."""
+    scraper = get_nightly_batch_scraper()
+    if not scraper.is_running:
+        return {"message": "Żadne nocne przetwarzanie nie jest obecnie aktywne."}
+
+    scraper.stop()
+    return {"message": "Wysłano sygnał zatrzymania nocnego przetwarzania."}

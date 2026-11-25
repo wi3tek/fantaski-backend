@@ -1,6 +1,7 @@
 import httpx
 from bs4 import BeautifulSoup
 from app import config
+from app.services.scrapers.http_client import safe_get
 
 
 def fetch_fis_calendar(seasoncode="2026", categorycode="WC", gendercode="M", seasonmonth="X-2026", **kwargs):
@@ -30,16 +31,15 @@ def fetch_fis_calendar(seasoncode="2026", categorycode="WC", gendercode="M", sea
     headers = config.DEFAULT_HEADERS
 
     try:
-        print(f"Pobieranie danych (Sezon: {params['seasoncode']}, Płeć: {params['gendercode']})...")
+        print(f"Pobieranie danych (Sezon: {params['seasoncode']}, Kategoria: {params['categorycode']}, Płeć: {params['gendercode']})...")
 
-        # 4. Asynchroniczno-kompatybilne pobieranie z httpx
-        response = httpx.get(base_url, headers=headers, params=params, timeout=25.0, follow_redirects=True)
-        response.raise_for_status()
+        # 4. Bezpieczne pobieranie z automatycznym retry i obsługą limitu 429
+        response = safe_get(base_url, params=params, timeout=25.0)
+        if not response:
+            print(f"⚠️ Nie udało się pobrać kalendarza FIS dla sezonu {seasoncode} ({categorycode})")
+            return []
 
-        # Opcjonalnie: podejrzyj wygenerowany URL
-        # print("Pełny URL zapytania:", response.url)
-
-        # 5. Parsowanie pobranego HTML (reszta bez zmian)
+        # 5. Parsowanie pobranego HTML
         soup = BeautifulSoup(response.text, 'html.parser')
         rows = soup.find_all('div', class_='table-row')
 
@@ -76,8 +76,8 @@ def fetch_fis_calendar(seasoncode="2026", categorycode="WC", gendercode="M", sea
 
         return events
 
-    except requests.exceptions.RequestException as e:
-        print(f"Błąd podczas pobierania strony: {e}")
+    except Exception as e:
+        print(f"Błąd podczas pobierania strony kalendarza FIS: {e}")
         return []
 
 

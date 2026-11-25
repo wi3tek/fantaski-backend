@@ -158,11 +158,34 @@ class WeatherService:
                     gusts = float(hourly.get("wind_gusts_10m", [wind_speed * 1.5])[idx] or (wind_speed * 1.5))
                     precip = float(hourly.get("precipitation", [0.0])[idx] or 0.0)
 
-                    # Obliczenie wiatru czołowego/tylnego (uproszczona estymacja wektorowa)
-                    # W skokach narciarskich przyjmuje się wiatr w granicach -3 m/s (w plecy) do +3 m/s (pod narty)
-                    # Zakładamy kierunek najazdu skoczni orientacyjny (lub symulowany):
-                    # Dla celów cech modelu: wind_head_component
-                    headwind = round(wind_speed * 0.7, 2)  # wstępna aproksymacja pod narty
+                    # Obliczenie wiatru czołowego/tylnego (estymacja wektorowa z kierunkiem wiatru)
+                    # Większość skoczni narciarskich ma orientację lotu ~N-S (oś zeskoku ~160-200°).
+                    # Wiatr pod narty (headwind) to wiatr wiający OD kierunku lądowania ku profilowi (pod kątem),
+                    # domyślna oś zeskoku ~180° (lot na południe). Pozytywna wartość = wiatr w twarz = pod narty.
+                    import math
+                    jump_axis_deg = 180.0  # domyślna oś lotu (na południe)
+                    angle_diff_rad = math.radians(wind_direction - jump_axis_deg)
+                    headwind = round(wind_speed * math.cos(angle_diff_rad), 2)
+
+                    # --- KORYTARZ STABILNOŚCI POGODOWEJ (okno konkursu: +2 godziny) ---
+                    idx_end = min(len(times) - 1, idx + 2) if idx != -1 else -1
+                    if idx_end != -1 and idx_end != idx:
+                        wind_speed_end = float(hourly.get("wind_speed_10m", [wind_speed])[idx_end] or wind_speed)
+                        wind_dir_end = float(hourly.get("wind_direction_10m", [wind_direction])[idx_end] or wind_direction)
+                        temp_end = float(hourly.get("temperature_2m", [temp])[idx_end] or temp)
+                        headwind_end = round(wind_speed_end * math.cos(math.radians(wind_dir_end - jump_axis_deg)), 2)
+
+                        wind_trend_slope = round(headwind_end - headwind, 2)
+                        dir_diff = abs(wind_dir_end - wind_direction)
+                        direction_shift = round(min(dir_diff, 360.0 - dir_diff), 1)
+                        temp_drift = round(temp_end - temp, 2)
+                    else:
+                        wind_trend_slope = 0.0
+                        direction_shift = 0.0
+                        temp_drift = 0.0
+
+                    volatility_idx = round(max(0.0, (gusts - wind_speed) / max(0.5, wind_speed)), 2)
+                    lottery_level = "HIGH" if volatility_idx >= 0.85 else ("MODERATE" if volatility_idx >= 0.35 else "LOW")
 
                     return {
                         "source": "Open-Meteo",
@@ -179,6 +202,11 @@ class WeatherService:
                         "relative_humidity": humidity,
                         "precipitation": precip,
                         "headwind_component": headwind,
+                        "wind_volatility_index": volatility_idx,
+                        "wind_trend_slope": wind_trend_slope,
+                        "direction_shift": direction_shift,
+                        "temperature_drift": temp_drift,
+                        "lottery_risk_level": lottery_level,
                         "is_forecast": not is_historical
                     }
         except Exception as e:
@@ -200,6 +228,11 @@ class WeatherService:
             "relative_humidity": 75.0,
             "precipitation": 0.0,
             "headwind_component": 1.0,
+            "wind_volatility_index": 0.67,
+            "wind_trend_slope": 0.0,
+            "direction_shift": 0.0,
+            "temperature_drift": -0.5,
+            "lottery_risk_level": "MODERATE",
             "is_forecast": not is_historical
         }
 

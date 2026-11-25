@@ -104,11 +104,11 @@ async def get_or_create_user(db, user_info: Dict[str, Any]) -> Dict[str, Any]:
         new_user["_id"] = str(res.inserted_id)
         return new_user
     else:
-        # Aktualizacja logowania i ewentualne wymuszenie ADMIN dla głównego maila
+        # Aktualizacja logowania i zachowanie spersonalizowanych danych (nazwa / awatar)
         update_fields: Dict[str, Any] = {
             "last_login": now,
-            "name": user_info.get("name") or user.get("name"),
-            "picture": user_info.get("picture") or user.get("picture", "")
+            "name": user.get("name") or user_info.get("name"),
+            "picture": user.get("picture") or user_info.get("picture", "")
         }
         if is_initial_admin and user.get("role") != Role.ADMIN:
             update_fields["role"] = Role.ADMIN
