@@ -55,7 +55,7 @@ class WeatherService:
         })
 
     def get_coordinates(self, place: str, country: Optional[str] = None) -> Optional[Tuple[float, float]]:
-        """Zwraca (szerokość_geogr, długość_geogr) dla danej miejscowości."""
+        """Zwraca (szerokość_geogr, długość_geogr) dla danej miejscowości """
         if not place:
             return None
 
