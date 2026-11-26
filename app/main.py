@@ -18,7 +18,29 @@ import csv
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+import logging
+import re
 from motor.motor_asyncio import AsyncIOMotorClient
+
+
+class _RedactTokenFilter(logging.Filter):
+    """Maskuje ewentualne parametry ?token=... w logach dostępowych Uvicorn."""
+
+    _PATTERN = re.compile(r"([?&](?:token|access_token|id_token)=)[^&\s\"']+", re.IGNORECASE)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            rendered = record.getMessage()
+            masked = self._PATTERN.sub(r"\1***", rendered)
+            if masked != rendered:
+                record.msg = masked
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_RedactTokenFilter())
 try:
     import torch
     torch.set_num_threads(1)

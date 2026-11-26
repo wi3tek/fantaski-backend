@@ -98,17 +98,14 @@ def _validate_picks_count(val: int) -> int:
 # =========================================================
 
 @router.get("/events/stream")
-async def stream_user_events(
-    request: Request,
-    token: Optional[str] = Query(default=None),
-):
-    """Strumień Server-Sent Events (SSE) dla powiadomień i odświeżania drafta bez przeładowania strony."""
+async def stream_user_events(request: Request):
+    """Strumień Server-Sent Events (SSE) dla powiadomień i odświeżania drafta (autoryzacja wyłącznie przez nagłówek Bearer)."""
     auth_header = request.headers.get("authorization") or ""
-    raw_token = token
-    if not raw_token and auth_header.lower().startswith("bearer "):
+    raw_token = None
+    if auth_header.lower().startswith("bearer "):
         raw_token = auth_header.split(" ", 1)[1].strip()
     if not raw_token:
-        raise HTTPException(status_code=401, detail="Brak tokenu autoryzacyjnego dla strumienia SSE.")
+        raise HTTPException(status_code=401, detail="Brak nagłówka autoryzacyjnego Bearer dla strumienia SSE.")
 
     payload = decode_access_token(raw_token)
     if not payload or not payload.get("sub"):
