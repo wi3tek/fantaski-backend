@@ -32,12 +32,14 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str = ""
     INITIAL_ADMIN_EMAIL: str = ""
 
-    # External APIs
+    # External APIs (konfigurowane wyłącznie przez .env / zmienne środowiskowe)
     GEMINI_API_KEY: str = ""
     CONFIG_EMAIL: str = ""
     CONFIG_PASS: str = ""
-    ESM_AUTH_URL: str = "https://esmdomainserviceproduction.azurewebsites.net/users/auth"
-    ESM_DATA_URL: str = "https://esmdomainserviceproduction.azurewebsites.net/players/clientData/5f7f6aeb9ed6e90012549269"
+    ESM_API_BASE: str = ""
+    ESM_AUTH_URL: str = ""
+    ESM_DATA_URL: str = ""
+    ESM_DEFAULT_LEAGUE_ID: str = ""
 
     # AI Model
     AI_MODEL: str = "gemini-2.5-pro"
@@ -64,8 +66,10 @@ settings = Settings()
 GEMINI_API_KEY = settings.GEMINI_API_KEY
 CONFIG_EMAIL = settings.CONFIG_EMAIL
 CONFIG_PASS = settings.CONFIG_PASS
+ESM_API_BASE = settings.ESM_API_BASE
 ESM_AUTH_URL = settings.ESM_AUTH_URL
 ESM_DATA_URL = settings.ESM_DATA_URL
+ESM_DEFAULT_LEAGUE_ID = settings.ESM_DEFAULT_LEAGUE_ID
 AI_MODEL = settings.AI_MODEL
 INITIAL_ADMIN_EMAIL = settings.INITIAL_ADMIN_EMAIL
 

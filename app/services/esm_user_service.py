@@ -12,10 +12,25 @@ from app.services.athletes_esm_prices import (
     get_esm_token as get_technical_esm_token,
 )
 
+from urllib.parse import urlparse
+
 logger = logging.getLogger(__name__)
 
-ESM_API_BASE = "https://esmdomainserviceproduction.azurewebsites.net"
-DEFAULT_ESM_LEAGUE_ID = "6ae06420a36131d6eb48db15"
+
+def _resolve_esm_api_base() -> str:
+    explicit = (getattr(config, "ESM_API_BASE", "") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    auth_url = (getattr(config, "ESM_AUTH_URL", "") or "").strip()
+    if auth_url:
+        parsed = urlparse(auth_url)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+    return ""
+
+
+ESM_API_BASE = _resolve_esm_api_base()
+DEFAULT_ESM_LEAGUE_ID = (getattr(config, "ESM_DEFAULT_LEAGUE_ID", "") or "").strip()
 
 
 def _resolve_ioc_from_esm(player: Dict[str, Any], countries_dict: Dict[str, Any]) -> str:
@@ -187,6 +202,8 @@ def decode_esm_token_email(token: str) -> Optional[str]:
 
 async def login_esm_with_credentials(email: str, password: str) -> str:
     """Oficjalne logowanie do API esmManager przez email + hasło (POST /users/auth)."""
+    if not ESM_API_BASE:
+        raise ValueError("Brak konfiguracji ESM_API_BASE / ESM_AUTH_URL w zmiennych środowiskowych.")
     url = f"{ESM_API_BASE}/users/auth"
     payload = {"email": email.strip(), "password": password, "from": "/joinTeam"}
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -201,6 +218,8 @@ async def login_esm_with_credentials(email: str, password: str) -> str:
 
 
 async def fetch_esm_my_team(token: str, league_id: str = DEFAULT_ESM_LEAGUE_ID) -> Any:
+    if not ESM_API_BASE:
+        raise ValueError("Brak konfiguracji ESM_API_BASE w zmiennych środowiskowych.")
     url = f"{ESM_API_BASE}/leagues/fantasy/userteams/league/{league_id}"
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers={"x-auth-token": token.strip()})
@@ -216,6 +235,8 @@ async def fetch_esm_team_by_id(team_id: str, token: Optional[str] = None) -> Any
     clean_id = str(team_id or "").strip()
     if not clean_id:
         return None
+    if not ESM_API_BASE:
+        raise ValueError("Brak konfiguracji ESM_API_BASE w zmiennych środowiskowych.")
     use_tok = token.strip() if token else get_technical_esm_token()
     url = f"{ESM_API_BASE}/leagues/fantasy/userteams/{clean_id}"
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -231,6 +252,8 @@ async def fetch_esm_team_by_id(team_id: str, token: Optional[str] = None) -> Any
 
 
 async def fetch_esm_friends(token: str) -> List[Dict[str, Any]]:
+    if not ESM_API_BASE:
+        raise ValueError("Brak konfiguracji ESM_API_BASE w zmiennych środowiskowych.")
     url = f"{ESM_API_BASE}/users/me/friends"
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers={"x-auth-token": token.strip()})

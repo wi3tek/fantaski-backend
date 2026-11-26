@@ -26,6 +26,8 @@ def extract_significant_tokens(text: str) -> list[str]:
     return [t for t in tokens if len(t) > 1]
 
 def get_esm_token() -> str:
+    if not config.ESM_AUTH_URL or not config.CONFIG_EMAIL or not config.CONFIG_PASS:
+        raise ValueError("Brak konfiguracji ESM_AUTH_URL / CONFIG_EMAIL / CONFIG_PASS w zmiennych środowiskowych.")
     print("[DEBUG] Pobieranie tokena ESM...")
     payload = {"email": config.CONFIG_EMAIL, "password": config.CONFIG_PASS, "from": "/joinTeam"}
     response = httpx.post(config.ESM_AUTH_URL, json=payload, timeout=15)
@@ -33,6 +35,8 @@ def get_esm_token() -> str:
     return response.text.strip()
 
 def get_players_data(token: str) -> list:
+    if not config.ESM_DATA_URL:
+        raise ValueError("Brak konfiguracji ESM_DATA_URL w zmiennych środowiskowych.")
     print("[DEBUG] Pobieranie listy zawodników z ESM...")
     response = httpx.get(config.ESM_DATA_URL, headers={"x-auth-token": token}, timeout=15)
     response.raise_for_status()
