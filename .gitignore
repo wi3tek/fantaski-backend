@@ -105,7 +105,7 @@ app/results.json
 .idea/
 .vscode/
 !.vscode/extensions.json
-FIScraper.iml
+fantaski-backend.iml
 *.iml
 *.swp
 *.swo

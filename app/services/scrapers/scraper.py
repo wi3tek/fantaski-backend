@@ -61,13 +61,20 @@ def fetch_fis_calendar(seasoncode="2026", categorycode="WC", gendercode="M", sea
             country_span = row.find('span', class_='country__name-short')
             country = country_span.text.strip() if country_span else "Brak kraju"
 
+            status_items = row.select('.status__item')
+            status_titles = [str(el.get('title') or '').strip().lower() for el in status_items]
+            is_cancelled_on_fis = any(t == 'cancelled' for t in status_titles)
+            has_results_on_fis = any('data available' in t for t in status_titles)
+
             events.append({
                 "id": event_id,
                 "date": date,
                 "place": place,
                 "country": country,
                 "url": event_url,
-                "categorycode": categorycode
+                "categorycode": categorycode,
+                "is_cancelled": is_cancelled_on_fis,
+                "has_results_on_fis": has_results_on_fis,
             })
 
             # Wypisanie wyniku w konsoli

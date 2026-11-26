@@ -28,6 +28,14 @@ def parse_date_range_end(date_str: str, default_year: int) -> datetime.date:
     }
     date_str_clean = date_str.strip().upper()
 
+    # Format przełomu roku: "29 DEC-01 JAN 2027" lub "31 DEC - 01 JAN 2027"
+    m_cross = re.search(r'\d{1,2}\s+[A-Z]{3}\s*-\s*(\d{1,2})\s+([A-Z]{3})\s+(\d{4})', date_str_clean)
+    if m_cross:
+        day = int(m_cross.group(1))
+        mon = months.get(m_cross.group(2), 1)
+        yr = int(m_cross.group(3))
+        return datetime.date(yr, mon, day)
+
     # Format: "27-29 NOV 2026"
     m1 = re.search(r'\d{1,2}\s*-\s*(\d{1,2})\s+([A-Z]{3})\s+(\d{4})', date_str_clean)
     if m1:
@@ -51,7 +59,68 @@ def parse_date_range_end(date_str: str, default_year: int) -> datetime.date:
         yr = int(m3.group(3))
         return datetime.date(yr, mon, day)
 
+    # Format: "28 NOV"
+    m4 = re.search(r'(\d{1,2})\s+([A-Z]{3})', date_str_clean)
+    if m4:
+        day = int(m4.group(1))
+        mon = months.get(m4.group(2), 11)
+        return datetime.date(default_year, mon, day)
+
     return datetime.date(default_year, 12, 31)
+
+
+def parse_date_range_start(date_str: str, default_year: int) -> datetime.date:
+    """
+    Parsuje napis daty FIS np. '27-29 Nov 2026', '20-22 Nov' lub '31 Dec-01 Jan 2027'.
+    Zwraca początkową datę weekendu jako datetime.date.
+    """
+    months = {
+        'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+        'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+    }
+    date_str_clean = date_str.strip().upper()
+
+    # Format przełomu roku: "29 DEC-01 JAN 2027"
+    m_cross = re.search(r'(\d{1,2})\s+([A-Z]{3})\s*-\s*\d{1,2}\s+([A-Z]{3})\s+(\d{4})', date_str_clean)
+    if m_cross:
+        day = int(m_cross.group(1))
+        mon_s = months.get(m_cross.group(2), 12)
+        mon_e = months.get(m_cross.group(3), 1)
+        yr_e = int(m_cross.group(4))
+        yr_s = yr_e - 1 if mon_s > mon_e else yr_e
+        return datetime.date(yr_s, mon_s, day)
+
+    # Format: "27-29 NOV 2026"
+    m1 = re.search(r'(\d{1,2})\s*-\s*\d{1,2}\s+([A-Z]{3})\s+(\d{4})', date_str_clean)
+    if m1:
+        day = int(m1.group(1))
+        mon = months.get(m1.group(2), 11)
+        yr = int(m1.group(3))
+        return datetime.date(yr, mon, day)
+
+    # Format: "20-22 NOV"
+    m2 = re.search(r'(\d{1,2})\s*-\s*\d{1,2}\s+([A-Z]{3})', date_str_clean)
+    if m2:
+        day = int(m2.group(1))
+        mon = months.get(m2.group(2), 11)
+        return datetime.date(default_year, mon, day)
+
+    # Format: "28 NOV 2026"
+    m3 = re.search(r'(\d{1,2})\s+([A-Z]{3})\s+(\d{4})', date_str_clean)
+    if m3:
+        day = int(m3.group(1))
+        mon = months.get(m3.group(2), 11)
+        yr = int(m3.group(3))
+        return datetime.date(yr, mon, day)
+
+    # Format: "28 NOV"
+    m4 = re.search(r'(\d{1,2})\s+([A-Z]{3})', date_str_clean)
+    if m4:
+        day = int(m4.group(1))
+        mon = months.get(m4.group(2), 11)
+        return datetime.date(default_year, mon, day)
+
+    return datetime.date(default_year, 11, 1)
 
 
 async def get_next_upcoming_competition(

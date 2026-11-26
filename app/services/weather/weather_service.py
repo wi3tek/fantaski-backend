@@ -51,7 +51,7 @@ class WeatherService:
         self.db = db
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "FIScraper-DataSKI-Prediction/1.0"
+            "User-Agent": "FantaSKI-DataSKI-Prediction/1.0"
         })
 
     def get_coordinates(self, place: str, country: Optional[str] = None) -> Optional[Tuple[float, float]]:

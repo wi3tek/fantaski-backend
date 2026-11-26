@@ -36,7 +36,7 @@ htmlcov/
 # Pliki środowisk IDE
 .idea/
 .vscode/
-FIScraper.iml
+fantaski-backend.iml
 
 # Pliki scraperów, logi i zrzuty
 *.pdf

@@ -14,7 +14,7 @@ async def search_athlete_results(db, names=None, place=None, hill_type=None, dat
     match_stage = {}
 
     if place:
-        match_stage["event_place"] = {"$regex": place, "$options": "i"}
+        match_stage["event_place"] = {"$regex": re.escape(place.strip()), "$options": "i"}
 
     if category:
         if isinstance(category, list) and len(category) > 0:
@@ -26,7 +26,7 @@ async def search_athlete_results(db, names=None, place=None, hill_type=None, dat
         match_stage["hillType"] = hill_type
 
     if session_type:
-        match_stage["session_type"] = {"$regex": session_type, "$options": "i"}
+        match_stage["session_type"] = {"$regex": re.escape(session_type.strip()), "$options": "i"}
 
     if date_from or date_to:
         match_stage["date"] = {}
@@ -36,17 +36,16 @@ async def search_athlete_results(db, names=None, place=None, hill_type=None, dat
             match_stage["date"]["$lte"] = date_to
 
     if names:
-        match_stage["results_data.results"] = {"$elemMatch": {"name": {"$in": names}}}
+        match_stage["results_data.results"] = {"$elemMatch": {"name": {"$in": names[:30]}}}
 
     pipeline = [{"$match": match_stage}]
 
     # --- 2. SORTOWANIE SESJI ---
     pipeline.append({"$sort": {"date": -1, "time": -1}})
 
-    # Pobieramy N sesji - jedna sesja to zwykle 1-3 skoków, więc
-    # pobranie 'limit' sesji gwarantuje, że będziemy mieli co przycinać.
-    if limit:
-        pipeline.append({"$limit": limit})
+    # Bezpieczny twardy limit sesji dla ochrony pamięci RAM i MongoDB
+    safe_limit = min(int(limit), 120) if limit and int(limit) > 0 else 100
+    pipeline.append({"$limit": safe_limit})
 
     # --- 3. OPTYMALIZACJA PAYLOADU ($project + $filter) ---
     if names:

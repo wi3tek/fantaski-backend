@@ -1,0 +1,271 @@
+{
+  "run_at": "2026-11-25T22:02:54.456304",
+  "elapsed_seconds": 1013.7,
+  "stopped": false,
+  "improved": false,
+  "best_candidate_label": "Aktualna baza (bez zmian)",
+  "tune_seasons": [
+    "2020",
+    "2021",
+    "2022",
+    "2023",
+    "2024",
+    "2025"
+  ],
+  "holdout_seasons": [
+    "2026",
+    "2027"
+  ],
+  "baseline": {
+    "tune_score": 86.365,
+    "holdout_score": 83.6,
+    "tune_overall": {
+      "competitions_evaluated": 176,
+      "avg_rank_mae": 7.09,
+      "dist_mae_m": 11.32,
+      "spearman_corr": 0.763,
+      "winner_top1_pct": 32.4,
+      "winner_top3_pct": 64.8,
+      "podium_hit_pct": 50.2,
+      "top10_hit_pct": 66.2,
+      "top30_hit_pct": 83.9
+    },
+    "holdout_overall": {
+      "competitions_evaluated": 34,
+      "avg_rank_mae": 7.06,
+      "dist_mae_m": 9.22,
+      "spearman_corr": 0.758,
+      "winner_top1_pct": 44.1,
+      "winner_top3_pct": 61.8,
+      "podium_hit_pct": 45.1,
+      "top10_hit_pct": 63.5,
+      "top30_hit_pct": 83.5
+    },
+    "params": {
+      "comp_half_life_days": 35.0,
+      "qua_half_life_days": 10.0,
+      "trial_half_life_days": 4.0,
+      "training_half_life_days": 3.0,
+      "recent_form_window_days": 28,
+      "weekend_comp_weight": 1.0,
+      "weekend_qua_weight": 0.75,
+      "weekend_trial_weight": 0.45,
+      "weekend_training_weight": 0.3,
+      "rolling_window_seasons": 8,
+      "loss_quality_weight": 0.75,
+      "points_blend_quality_weight": 0.7,
+      "lr": 0.004,
+      "dropout": 0.12,
+      "weight_decay": 0.0002,
+      "epochs": 50
+    }
+  },
+  "best": {
+    "tune_score": 87.04,
+    "holdout_score": 82.82,
+    "tune_overall": {
+      "competitions_evaluated": 176,
+      "avg_rank_mae": 7.06,
+      "dist_mae_m": 11.28,
+      "spearman_corr": 0.765,
+      "winner_top1_pct": 31.2,
+      "winner_top3_pct": 68.2,
+      "podium_hit_pct": 51.3,
+      "top10_hit_pct": 66.5,
+      "top30_hit_pct": 84.1
+    },
+    "holdout_overall": {
+      "competitions_evaluated": 34,
+      "avg_rank_mae": 7.12,
+      "dist_mae_m": 9.63,
+      "spearman_corr": 0.757,
+      "winner_top1_pct": 44.1,
+      "winner_top3_pct": 61.8,
+      "podium_hit_pct": 44.1,
+      "top10_hit_pct": 63.2,
+      "top30_hit_pct": 83.2
+    },
+    "params": {
+      "comp_half_life_days": 35.0,
+      "qua_half_life_days": 10.0,
+      "trial_half_life_days": 4.0,
+      "training_half_life_days": 3.0,
+      "recent_form_window_days": 28,
+      "weekend_comp_weight": 1.0,
+      "weekend_qua_weight": 0.75,
+      "weekend_trial_weight": 0.45,
+      "weekend_training_weight": 0.3,
+      "rolling_window_seasons": 8,
+      "loss_quality_weight": 0.75,
+      "points_blend_quality_weight": 0.7,
+      "lr": 0.004,
+      "dropout": 0.12,
+      "weight_decay": 0.0002,
+      "epochs": 50
+    }
+  },
+  "trials_evaluated": 16,
+  "trials": [
+    {
+      "stage": "stage2",
+      "label": "Nacisk na jakość rankingu (85/15, blend 80%)",
+      "tune_score": 87.04,
+      "overall": {
+        "competitions_evaluated": 176,
+        "avg_rank_mae": 7.06,
+        "dist_mae_m": 11.28,
+        "spearman_corr": 0.765,
+        "winner_top1_pct": 31.2,
+        "winner_top3_pct": 68.2,
+        "podium_hit_pct": 51.3,
+        "top10_hit_pct": 66.5,
+        "top30_hit_pct": 84.1
+      }
+    },
+    {
+      "stage": "stage2",
+      "label": "Ranking 85% + wyższy blend 90% + stabilizacja",
+      "tune_score": 86.9,
+      "overall": {
+        "competitions_evaluated": 176,
+        "avg_rank_mae": 7.06,
+        "dist_mae_m": 11.27,
+        "spearman_corr": 0.765,
+        "winner_top1_pct": 31.8,
+        "winner_top3_pct": 67.6,
+        "podium_hit_pct": 51.1,
+        "top10_hit_pct": 66.4,
+        "top30_hit_pct": 84.0
+      }
+    },
+    {
+      "stage": "stage2",
+      "label": "Ranking 85% + lekka regularyzacja",
+      "tune_score": 86.845,
+      "overall": {
+        "competitions_evaluated": 176,
+        "avg_rank_mae": 7.06,
+        "dist_mae_m": 11.24,
+        "spearman_corr": 0.764,
+        "winner_top1_pct": 32.4,
+        "winner_top3_pct": 68.2,
+        "podium_hit_pct": 50.8,
+        "top10_hit_pct": 66.4,
+        "top30_hit_pct": 84.1
+      }
+    },
+    {
+      "stage": "stage2",
+      "label": "Maksymalna jakość rankingu (90/10, blend 90%)",
+      "tune_score": 86.755,
+      "overall": {
+        "competitions_evaluated": 176,
+        "avg_rank_mae": 7.05,
+        "dist_mae_m": 11.17,
+        "spearman_corr": 0.764,
+        "winner_top1_pct": 31.8,
+        "winner_top3_pct": 67.6,
+        "podium_hit_pct": 50.6,
+        "top10_hit_pct": 66.4,
+        "top30_hit_pct": 83.9
+      }
+    },
+    {
+      "stage": "stage1",
+      "label": "Dłuższa pamięć formy (45d / 35d)",
+      "tune_score": 86.725,
+      "overall": {
+        "competitions_evaluated": 176,
+        "avg_rank_mae": 7.08,
+        "dist_mae_m": 11.4,
+        "spearman_corr": 0.764,
+        "winner_top1_pct": 31.8,
+        "winner_top3_pct": 65.9,
+        "podium_hit_pct": 50.6,
+        "top10_hit_pct": 66.4,
+        "top30_hit_pct": 84.1
+      }
+    },
+    {
+      "stage": "stage2",
+      "label": "Lekki dropout + szybsze uczenie",
+      "tune_score": 86.69,
+      "overall": {
+        "competitions_evaluated": 176,
+        "avg_rank_mae": 7.08,
+        "dist_mae_m": 11.33,
+        "spearman_corr": 0.763,
+        "winner_top1_pct": 31.2,
+        "winner_top3_pct": 66.5,
+        "podium_hit_pct": 50.9,
+        "top10_hit_pct": 66.3,
+        "top30_hit_pct": 84.1
+      }
+    },
+    {
+      "stage": "stage1",
+      "label": "Mocniejszy bieżący weekend",
+      "tune_score": 86.68,
+      "overall": {
+        "competitions_evaluated": 176,
+        "avg_rank_mae": 7.08,
+        "dist_mae_m": 11.29,
+        "spearman_corr": 0.763,
+        "winner_top1_pct": 31.8,
+        "winner_top3_pct": 66.5,
+        "podium_hit_pct": 50.8,
+        "top10_hit_pct": 66.4,
+        "top30_hit_pct": 84.0
+      }
+    },
+    {
+      "stage": "stage2",
+      "label": "Spokojniejsza zbieżność (lr 0.0025, epoki 65)",
+      "tune_score": 86.68,
+      "overall": {
+        "competitions_evaluated": 176,
+        "avg_rank_mae": 7.08,
+        "dist_mae_m": 11.22,
+        "spearman_corr": 0.764,
+        "winner_top1_pct": 31.2,
+        "winner_top3_pct": 67.0,
+        "podium_hit_pct": 50.6,
+        "top10_hit_pct": 66.4,
+        "top30_hit_pct": 84.0
+      }
+    },
+    {
+      "stage": "stage1",
+      "label": "Krótsza pamięć formy (24d / 21d)",
+      "tune_score": 86.565,
+      "overall": {
+        "competitions_evaluated": 176,
+        "avg_rank_mae": 7.08,
+        "dist_mae_m": 11.31,
+        "spearman_corr": 0.763,
+        "winner_top1_pct": 32.4,
+        "winner_top3_pct": 65.9,
+        "podium_hit_pct": 50.4,
+        "top10_hit_pct": 66.5,
+        "top30_hit_pct": 83.8
+      }
+    },
+    {
+      "stage": "stage2",
+      "label": "Mocniejsza regularyzacja (dropout 0.18, wd 5e-4)",
+      "tune_score": 86.455,
+      "overall": {
+        "competitions_evaluated": 176,
+        "avg_rank_mae": 7.08,
+        "dist_mae_m": 11.29,
+        "spearman_corr": 0.764,
+        "winner_top1_pct": 32.4,
+        "winner_top3_pct": 65.9,
+        "podium_hit_pct": 49.8,
+        "top10_hit_pct": 66.2,
+        "top30_hit_pct": 84.1
+      }
+    }
+  ],
+  "retrained_model_meta": null
+}

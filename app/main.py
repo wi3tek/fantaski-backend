@@ -1,4 +1,5 @@
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from app.controller.auth_controller import router as auth_router
 from app.controller.athletes_controller import router as athletes_router
 from app.controller.admin_controller import router as admin_router
@@ -6,6 +7,8 @@ from app.controller.stats_controller import router as stats_router
 from app.controller.pdf_scraper_controller import router as pdf_router
 from app.controller.hills_controller import router as hills_router
 from app.controller.prediction_controller import router as prediction_router
+from app.controller.esm_controller import router as esm_router
+from app.controller.draft_controller import router as draft_router
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from fastapi import Request
@@ -91,22 +94,40 @@ async def lifespan(app: FastAPI):
     print(f"🔐  Logowanie dev-login:   {'WŁĄCZONE (tylko dev/test)' if settings.ENABLE_DEV_LOGIN else 'WYŁĄCZONE (bezpieczne)'}")
     print("=" * 65 + "\n")
 
-    # Uruchamiane przy starcie aplikacji (optymalizacja puli połączeń dla darmowych klastrów Atlas M0)
+    from app.services.auth_service import INSECURE_DEFAULT_JWT_SECRET
+    if settings.ENVIRONMENT == "production":
+        if not settings.JWT_SECRET or settings.JWT_SECRET == INSECURE_DEFAULT_JWT_SECRET or len(settings.JWT_SECRET) < 32:
+            raise RuntimeError("BŁĄD BEZPIECZEŃSTWA: Na produkcji ustaw silny JWT_SECRET (>= 32 znaki) w zmiennych środowiskowych!")
+
+    # Uruchamiane przy starcie aplikacji (optymalizacja puli połączeń)
     app.mongodb_client = AsyncIOMotorClient(
         settings.MONGO_URL,
-        maxPoolSize=10,
+        maxPoolSize=25,
         minPoolSize=1,
         serverSelectionTimeoutMS=5000
     )
     app.database = app.mongodb_client[settings.MONGO_DB_NAME]
     print(f"Połączono z MongoDB! [Baza: {settings.MONGO_DB_NAME}]")
 
-    # Indeksy w bazie dla użytkowników
     try:
-        await app.database["users"].create_index("email", unique=True)
-        await app.database["users"].create_index("created_at")
+        from app.services.prediction.hyperparams_service import load_active_hyperparams_from_db
+        await load_active_hyperparams_from_db(app.database)
     except Exception as e:
-        print(f"Błąd podczas tworzenia indeksów dla users: {e}")
+        print(f"Uwaga: Nie udało się załadować hiperparametrów predykcji z MongoDB: {e}")
+
+    # Automatyczne zapewnienie kompletu indeksów produkcyjnych (users, draft, notifications, sessions, athletes, hills)
+    try:
+        from app.scripts.setup_indexes import ensure_all_indexes
+        await ensure_all_indexes(app.database)
+    except Exception as e:
+        print(f"Błąd podczas tworzenia indeksów MongoDB: {e}")
+
+    # Ładowanie modelu NN (wagi + stan ekstraktora gzip) oraz raportów backtest/auto-tuner z MongoDB
+    try:
+        from app.services.prediction.ml_storage import load_ml_artifacts_from_db
+        await load_ml_artifacts_from_db(app.database)
+    except Exception as e:
+        print(f"Uwaga: Nie udało się załadować artefaktów ML z MongoDB: {e}")
 
     app.state.dicts = load_dictionaries()
 
@@ -148,11 +169,16 @@ async def lifespan(app: FastAPI):
     # Uruchamiane przy wyłączaniu aplikacji
     app.mongodb_client.close()
     print("Rozłączono z MongoDB.")
+
+_is_prod = getattr(settings, "ENVIRONMENT", "development") == "production"
 app = FastAPI(
     title="FantaSKI API",
     description="Backend API platformy FantaSKI — wyniki, analityka i predykcje skoków narciarskich",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None if _is_prod else "/docs",
+    redoc_url=None if _is_prod else "/redoc",
+    openapi_url=None if _is_prod else "/openapi.json",
 )
 
 # Podpinamy limiter pod FastAPI
@@ -162,6 +188,8 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # CORS
 cors_list = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
 is_wildcard = "*" in cors_list or not cors_list
+
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.add_middleware(
     CORSMiddleware,
@@ -196,4 +224,6 @@ app.include_router(stats_router)
 app.include_router(pdf_router, prefix="/api/v1")
 app.include_router(hills_router)
 app.include_router(prediction_router)
+app.include_router(esm_router)
+app.include_router(draft_router)
 

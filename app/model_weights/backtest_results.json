@@ -1,0 +1,303 @@
+{
+  "run_at": "2026-11-25T22:07:20.863839",
+  "elapsed_seconds": 102.3,
+  "test_seasons": [
+    "2020",
+    "2021",
+    "2022",
+    "2023",
+    "2024",
+    "2025",
+    "2026",
+    "2027"
+  ],
+  "hyperparams": {
+    "comp_half_life_days": 35.0,
+    "qua_half_life_days": 10.0,
+    "trial_half_life_days": 4.0,
+    "training_half_life_days": 3.0,
+    "recent_form_window_days": 28,
+    "weekend_comp_weight": 1.0,
+    "weekend_qua_weight": 0.75,
+    "weekend_trial_weight": 0.45,
+    "weekend_training_weight": 0.3,
+    "rolling_window_seasons": 8,
+    "loss_quality_weight": 0.75,
+    "points_blend_quality_weight": 0.7,
+    "lr": 0.004,
+    "dropout": 0.12,
+    "weight_decay": 0.0002,
+    "epochs": 50
+  },
+  "overall": {
+    "competitions_evaluated": 210,
+    "avg_rank_mae": 7.1,
+    "dist_mae_m": 10.95,
+    "spearman_corr": 0.762,
+    "winner_top1_pct": 33.8,
+    "winner_top3_pct": 64.3,
+    "podium_hit_pct": 49.7,
+    "top10_hit_pct": 65.8,
+    "top30_hit_pct": 83.9
+  },
+  "folds": [
+    {
+      "season": "2020",
+      "train_samples": 7945,
+      "best_epoch": 16,
+      "competitions_evaluated": 27,
+      "avg_rank_mae": 7.3,
+      "dist_mae_m": 9.87,
+      "spearman_corr": 0.774,
+      "winner_top1_pct": 25.9,
+      "winner_top3_pct": 59.3,
+      "podium_hit_pct": 50.6,
+      "top10_hit_pct": 60.7,
+      "top30_hit_pct": 84.4
+    },
+    {
+      "season": "2021",
+      "train_samples": 11692,
+      "best_epoch": 4,
+      "competitions_evaluated": 25,
+      "avg_rank_mae": 7.78,
+      "dist_mae_m": 8.51,
+      "spearman_corr": 0.726,
+      "winner_top1_pct": 44.0,
+      "winner_top3_pct": 64.0,
+      "podium_hit_pct": 42.7,
+      "top10_hit_pct": 65.6,
+      "top30_hit_pct": 80.8
+    },
+    {
+      "season": "2022",
+      "train_samples": 14094,
+      "best_epoch": 15,
+      "competitions_evaluated": 28,
+      "avg_rank_mae": 7.38,
+      "dist_mae_m": 13.17,
+      "spearman_corr": 0.744,
+      "winner_top1_pct": 25.0,
+      "winner_top3_pct": 67.9,
+      "podium_hit_pct": 45.2,
+      "top10_hit_pct": 65.7,
+      "top30_hit_pct": 84.2
+    },
+    {
+      "season": "2023",
+      "train_samples": 17769,
+      "best_epoch": 19,
+      "competitions_evaluated": 32,
+      "avg_rank_mae": 6.89,
+      "dist_mae_m": 8.26,
+      "spearman_corr": 0.772,
+      "winner_top1_pct": 31.2,
+      "winner_top3_pct": 78.1,
+      "podium_hit_pct": 59.4,
+      "top10_hit_pct": 67.8,
+      "top30_hit_pct": 83.9
+    },
+    {
+      "season": "2024",
+      "train_samples": 21199,
+      "best_epoch": 30,
+      "competitions_evaluated": 33,
+      "avg_rank_mae": 6.78,
+      "dist_mae_m": 13.76,
+      "spearman_corr": 0.767,
+      "winner_top1_pct": 33.3,
+      "winner_top3_pct": 51.5,
+      "podium_hit_pct": 46.5,
+      "top10_hit_pct": 66.4,
+      "top30_hit_pct": 84.7
+    },
+    {
+      "season": "2025",
+      "train_samples": 24774,
+      "best_epoch": 29,
+      "competitions_evaluated": 31,
+      "avg_rank_mae": 6.64,
+      "dist_mae_m": 13.81,
+      "spearman_corr": 0.788,
+      "winner_top1_pct": 32.3,
+      "winner_top3_pct": 74.2,
+      "podium_hit_pct": 58.1,
+      "top10_hit_pct": 71.0,
+      "top30_hit_pct": 85.1
+    },
+    {
+      "season": "2026",
+      "train_samples": 28163,
+      "best_epoch": 30,
+      "competitions_evaluated": 32,
+      "avg_rank_mae": 7.08,
+      "dist_mae_m": 8.96,
+      "spearman_corr": 0.759,
+      "winner_top1_pct": 46.9,
+      "winner_top3_pct": 56.2,
+      "podium_hit_pct": 45.8,
+      "top10_hit_pct": 63.4,
+      "top30_hit_pct": 83.3
+    },
+    {
+      "season": "2027",
+      "train_samples": 27587,
+      "best_epoch": 12,
+      "competitions_evaluated": 2,
+      "avg_rank_mae": 8.24,
+      "dist_mae_m": 9.61,
+      "spearman_corr": 0.69,
+      "winner_top1_pct": 0.0,
+      "winner_top3_pct": 50.0,
+      "podium_hit_pct": 16.7,
+      "top10_hit_pct": 55.0,
+      "top30_hit_pct": 85.0
+    }
+  ],
+  "recent_competitions": [
+    {
+      "date": "2026-11-22",
+      "place": "Lillehammer",
+      "category": "WC",
+      "podium_hits": 1,
+      "top10_hits": 7,
+      "rank_mae": 6.6,
+      "predicted_top3": [
+        "EMBACHER Stephan",
+        "SUNDAL Kristoffer Eriksen",
+        "TSCHOFENIG Daniel"
+      ],
+      "actual_top3": [
+        "SUNDAL Kristoffer Eriksen",
+        "ZIMMERMANN Raffael",
+        "LANGMO Isak Andreas"
+      ]
+    },
+    {
+      "date": "2026-11-21",
+      "place": "Lillehammer",
+      "category": "WC",
+      "podium_hits": 0,
+      "top10_hits": 4,
+      "rank_mae": 9.9,
+      "predicted_top3": [
+        "SUNDAL Kristoffer Eriksen",
+        "NIKAIDO Ren",
+        "KOBAYASHI Ryoyu"
+      ],
+      "actual_top3": [
+        "EMBACHER Stephan",
+        "GRANERUD Halvor Egner",
+        "ZIMMERMANN Raffael"
+      ]
+    },
+    {
+      "date": "2026-03-29",
+      "place": "Planica",
+      "category": "WC",
+      "podium_hits": 1,
+      "top10_hits": 5,
+      "rank_mae": 5.5,
+      "predicted_top3": [
+        "PREVC Domen",
+        "NIKAIDO Ren",
+        "EMBACHER Stephan"
+      ],
+      "actual_top3": [
+        "LINDVIK Marius",
+        "PREVC Domen",
+        "FORFANG Johann Andre"
+      ]
+    },
+    {
+      "date": "2026-03-27",
+      "place": "Planica",
+      "category": "WC",
+      "podium_hits": 1,
+      "top10_hits": 6,
+      "rank_mae": 4.7,
+      "predicted_top3": [
+        "PREVC Domen",
+        "EMBACHER Stephan",
+        "LANISEK Anze"
+      ],
+      "actual_top3": [
+        "PREVC Domen",
+        "NIKAIDO Ren",
+        "TSCHOFENIG Daniel"
+      ]
+    },
+    {
+      "date": "2026-03-21",
+      "place": "Vikersund",
+      "category": "WC",
+      "podium_hits": 1,
+      "top10_hits": 6,
+      "rank_mae": 6.6,
+      "predicted_top3": [
+        "PREVC Domen",
+        "FORFANG Johann Andre",
+        "NIKAIDO Ren"
+      ],
+      "actual_top3": [
+        "EMBACHER Stephan",
+        "NAITO Tomofumi",
+        "FORFANG Johann Andre"
+      ]
+    },
+    {
+      "date": "2026-03-15",
+      "place": "Oslo",
+      "category": "WC",
+      "podium_hits": 0,
+      "top10_hits": 4,
+      "rank_mae": 11.8,
+      "predicted_top3": [
+        "NIKAIDO Ren",
+        "TSCHOFENIG Daniel",
+        "KOBAYASHI Ryoyu"
+      ],
+      "actual_top3": [
+        "NAITO Tomofumi",
+        "LANISEK Anze",
+        "AALTO Antti"
+      ]
+    },
+    {
+      "date": "2026-03-14",
+      "place": "Oslo",
+      "category": "WC",
+      "podium_hits": 0,
+      "top10_hits": 5,
+      "rank_mae": 11.8,
+      "predicted_top3": [
+        "PREVC Domen",
+        "EMBACHER Stephan",
+        "LANISEK Anze"
+      ],
+      "actual_top3": [
+        "DESCHWANDEN Gregor",
+        "ORTNER Maximilian",
+        "NAKAMURA Naoki"
+      ]
+    },
+    {
+      "date": "2026-03-07",
+      "place": "Lahti",
+      "category": "WC",
+      "podium_hits": 2,
+      "top10_hits": 6,
+      "rank_mae": 8.0,
+      "predicted_top3": [
+        "TSCHOFENIG Daniel",
+        "KOBAYASHI Ryoyu",
+        "RAIMUND Philipp"
+      ],
+      "actual_top3": [
+        "TSCHOFENIG Daniel",
+        "PREVC Domen",
+        "KOBAYASHI Ryoyu"
+      ]
+    }
+  ]
+}

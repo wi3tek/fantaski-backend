@@ -1,10 +1,13 @@
-from fastapi import APIRouter, HTTPException
-import uuid
+import asyncio
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from google import genai
 
 from app import config
+from app.auth import require_role
+from app.infrastructure.limiter import limiter
 from app.model.pdf_models import ScraperRequest
+from app.services.auth_service import Role
 
 # Opcjonalnie: importujemy nasz model danych z serwisu, aby użyć go w response_model
 from app.services.ai_pdf_service import przetworz_wyniki_fis
@@ -12,40 +15,40 @@ from app.services.ai_pdf_service import przetworz_wyniki_fis
 router = APIRouter(
     prefix="/pdf",
     tags=["PdfScraper"],
+    dependencies=[Depends(require_role(Role.ADMIN))],
 )
 
 
+def _get_genai_client():
+    if not config.GEMINI_API_KEY:
+        raise HTTPException(status_code=503, detail="Brak skonfigurowanego klucza GEMINI_API_KEY.")
+    return genai.Client(api_key=config.GEMINI_API_KEY)
+
+
 @router.post("/scrape-ski-jumping")
-async def scrape_results(request: ScraperRequest):
-    # Usunęliśmy BackgroundTasks. Teraz Endpoint czeka na przetworzenie pliku.
-    print(f"Otrzymano żądanie scrape'owania linku: {request.pdf_link}")
+@limiter.limit("10/minute")
+async def scrape_results(request: Request, payload: ScraperRequest):
+    pdf_url = str(payload.pdf_link)
+    if not pdf_url.startswith("https://www.fis-ski.com/") and not pdf_url.startswith("https://medias") and not pdf_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Dozwolone są wyłącznie bezpieczne adresy HTTPS.")
 
-    # Wywołujemy naszą zoptymalizowaną funkcję synchronicznie
-    zawody = przetworz_wyniki_fis(str(request.pdf_link))
+    zawody = await asyncio.to_thread(przetworz_wyniki_fis, pdf_url)
 
-    # Zabezpieczenie: jeśli coś poszło nie tak (zwrócono None)
     if not zawody:
         raise HTTPException(
             status_code=500,
             detail="Nie udało się przetworzyć pliku PDF lub API zwróciło błąd."
         )
 
-    # Zwracamy bezpośrednio obiekt Pydantic. FastAPI automatycznie
-    # zamieni go na poprawny, zagnieżdżony JSON!
     return zawody
 
 
-client = genai.Client(api_key=config.GEMINI_API_KEY)
-
-
 def list_ai_models():
-    models_list = []
-    for model in client.models.list():
-        models_list.append(model.name)
-    return models_list
-
+    client = _get_genai_client()
+    return [model.name for model in client.models.list()]
 
 
 @router.get("/ai-models")
-async def available_models():
-    return list_ai_models()
+@limiter.limit("20/minute")
+async def available_models(request: Request):
+    return await asyncio.to_thread(list_ai_models)

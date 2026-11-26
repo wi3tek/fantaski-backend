@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 from datetime import timezone
 from typing import Optional, Dict, Any, List
@@ -9,12 +10,18 @@ from google.auth.transport import requests as google_requests
 
 from app.config import settings
 
+INSECURE_DEFAULT_JWT_SECRET = "change-me-to-a-very-long-random-secret-in-production-123456789"
+
 class Role:
     USER = "USER"
-    USER_LITE = "USER_LITE"
+    USER_LITE = "USER_LITE"  # Legacy alias traktowany jak USER
     USER_PRO = "USER_PRO"
     ADMIN = "ADMIN"
     ALL = [USER, USER_LITE, USER_PRO, ADMIN]
+
+
+def is_pro_role(role: Optional[str]) -> bool:
+    return str(role or "").strip().upper() in {Role.USER_PRO, Role.ADMIN}
 
 def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] = None) -> str:
     """Tworzy podpisany token JWT z payloadem użytkownika."""
@@ -38,25 +45,35 @@ def decode_access_token(token: str) -> Optional[dict]:
 async def verify_google_token(token_str: str) -> Optional[Dict[str, Any]]:
     """
     Weryfikuje ID Token z Google OAuth2.
-    Wykorzystuje google-auth oraz fallback do Google Tokeninfo API.
+    - Gdy skonfigurowano GOOGLE_CLIENT_ID: wykonuje wyłącznie kryptograficzną weryfikację z kontrolą audience i email_verified (bez fallbacku fail-open).
+    - Gdy brak GOOGLE_CLIENT_ID (wyłącznie dev/test): używa Google tokeninfo z wymogiem zweryfikowanego e-maila.
     """
-    # 1. Próba weryfikacji biblioteką google-auth jeśli jest GOOGLE_CLIENT_ID
     if settings.GOOGLE_CLIENT_ID:
         try:
-            id_info = id_token.verify_oauth2_token(
-                token_str, google_requests.Request(), settings.GOOGLE_CLIENT_ID
+            id_info = await asyncio.to_thread(
+                id_token.verify_oauth2_token,
+                token_str,
+                google_requests.Request(),
+                settings.GOOGLE_CLIENT_ID,
             )
+            if not id_info or id_info.get("email_verified") is not True or not id_info.get("email"):
+                return None
             return {
                 "sub": id_info.get("sub"),
                 "email": id_info.get("email"),
                 "name": id_info.get("name") or id_info.get("email", "").split("@")[0],
                 "picture": id_info.get("picture", ""),
-                "email_verified": id_info.get("email_verified", False)
+                "email_verified": True,
             }
         except Exception as e:
             print(f"Błąd weryfikacji google-auth z client_id: {e}")
+            return None
 
-    # 2. Bezpośrednie zapytanie do endpointu Google tokeninfo (niezależne od client_id lub w fazie konfiguracji)
+    # Fallback dozwolony wyłącznie poza produkcją, gdy nie ustawiono GOOGLE_CLIENT_ID
+    if getattr(settings, "ENVIRONMENT", "development") == "production":
+        print("BŁĄD KONFIGURACJI: Brak GOOGLE_CLIENT_ID na środowisku produkcyjnym.")
+        return None
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
@@ -65,13 +82,14 @@ async def verify_google_token(token_str: str) -> Optional[Dict[str, Any]]:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                if "email" in data:
+                is_verified = data.get("email_verified") in [True, "true"]
+                if "email" in data and is_verified:
                     return {
                         "sub": data.get("sub"),
                         "email": data.get("email"),
                         "name": data.get("name") or data.get("email", "").split("@")[0],
                         "picture": data.get("picture", ""),
-                        "email_verified": data.get("email_verified") in [True, "true"]
+                        "email_verified": True,
                     }
     except Exception as e:
         print(f"Błąd zapytania do tokeninfo Google: {e}")

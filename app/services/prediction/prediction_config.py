@@ -38,37 +38,77 @@ RACE_CATEGORY_WEIGHTS: Dict[str, float] = {
 }
 
 # ==============================================================================
-# 2. WAGI TYPÓW SESJI W RAMACH WEEKENDU
+# 2. WAGI TYPÓW SESJI I DYNAMIKA CZASOWA (MULTI-SCALE TIME DECAY)
 # ==============================================================================
-# W skokach narciarskich konkurs główny to pełna stawka punktowa, presja i decydujący sygnał.
-# Kwalifikacje to skoki zachowawcze (awans do 50-tki).
-# Treningi służą testom sprzętu, belek i mają znikome znaczenie (częste DNS lub brak telemarku).
+# Konkurs główny ma długi rozpad formy (half-life = 35 dni) i najwyższą wagę.
+# Kwalifikacje (10 dni), serie próbne (4 dni) i treningi (3 dni) wygasają bardzo szybko,
+# przez co skoki sprzed roku praktycznie nie ważą w dzisiejszej ocenie formy.
 SESSION_TYPE_WEIGHTS: Dict[str, float] = {
     "COMPETITION": 1.00,       # Konkurs główny - pełna stawka punktowa i maksymalna presja
-    "QUA": 0.35,               # Kwalifikacje - skoki zachowawcze, czołówka często odpuszcza
-    "QUALIFICATION": 0.35,
-    "QUALIFICATIONS": 0.35,
-    "TRIAL": 0.05,             # Seria próbna bezpośrednio przed konkursem (wyczucie progu)
-    "TRAINING": 0.00,          # Oficjalne treningi (testy sprzętu, belek — pomijane w ocenie formy konkursowej)
+    "QUA": 0.45,               # Kwalifikacje - silny sygnał w krótkim oknie
+    "QUALIFICATION": 0.45,
+    "QUALIFICATIONS": 0.45,
+    "TRIAL": 0.25,             # Seria próbna - ważna w bieżącym weekendzie
+    "TRAINING": 0.15,          # Oficjalne treningi - liczone tylko krótkoterminowo
+}
+
+SESSION_HALF_LIFE_DAYS: Dict[str, float] = {
+    "COMPETITION": 35.0,
+    "QUA": 10.0,
+    "TRIAL": 4.0,
+    "TRAINING": 3.0,
+}
+
+# Maksymalny wiek (w dniach), po którym sesje niekonkursowe są całkowicie pomijane w formie
+SESSION_MAX_AGE_DAYS: Dict[str, int] = {
+    "COMPETITION": 730,
+    "QUA": 90,
+    "TRIAL": 21,
+    "TRAINING": 14,
+}
+
+# Okno bieżącego weekendu na tej samej skoczni (dni przed konkursem) i wagi hierarchii serii
+WEEKEND_LOOKBACK_DAYS: int = 4
+WEEKEND_SESSION_WEIGHTS: Dict[str, float] = {
+    "COMPETITION": 1.00,       # Np. sobotni konkurs przed niedzielnym
+    "QUA": 0.75,               # Kwalifikacje (w tym piątkowe na sobotę i niedzielę)
+    "TRIAL": 0.45,             # Seria próbna
+    "TRAINING": 0.30,          # Oficjalne serie treningowe
+}
+
+# Kolejność etapów w obrębie tego samego dnia / konkursu
+SESSION_STAGE_ORDER: Dict[str, int] = {
+    "TRAINING": 0,
+    "TRIAL": 1,
+    "QUA": 2,
+    "COMPETITION": 3,
+}
+
+# Ligowe wagi próbek podczas treningu sieci neuronowej (tylko COMPETITION; FC/WJC/FESA tylko jako tło historii)
+TRAINING_COMPETITION_CATEGORY_WEIGHTS: Dict[str, float] = {
+    "WC": 1.00,
+    "OWG": 1.00,
+    "WSC": 1.00,
+    "SFWC": 1.00,
+    "GP": 0.60,
+    "COC": 0.35,
 }
 
 # ==============================================================================
 # 3. DYNAMIKA CZASOWA FORMY (TIME-DECAY & RECENCY)
 # ==============================================================================
-# HALF_LIFE_DAYS: Czas połowicznego rozpadu wagi wyniku w dniach (~5 tygodni).
-# Ostatni miesiąc / początek sezonu ma decydujące znaczenie.
 HALF_LIFE_DAYS: float = 35.0
-
-# RECENT_FORM_WINDOW_DAYS: Okno bieżącej dyspozycji (ostatnie 4 tygodnie).
-# Wykorzystywane do wyliczenia cechy `recent_form_ratio`, która błyskawicznie
-# reaguje na skok formy (np. Sundal, Zimmermann po Lillehammer) lub załamanie formy.
 RECENT_FORM_WINDOW_DAYS: int = 28
+LOWER_TIER_DOMINANCE_WINDOW_DAYS: int = 120
+
+# Ruchome okno treningowe: ostatnie 8 sezonów (7 pełnych + bieżący, np. 2020-2027, za rok 2021-2028)
+TRAINING_ROLLING_WINDOW_SEASONS: int = 8
 
 # Domyślna ranga analizowanego konkursu
 DEFAULT_TARGET_CATEGORY: str = "WC"
 
-# Liczba cech wejściowych sieci neuronowej (czysty, bezszumowy, niezależny od kolejności wektor 14 cech)
-INPUT_FEATURES_DIM: int = 14
+# Liczba cech wejściowych sieci neuronowej (18 czystych cech bez wycieku z przyszłości)
+INPUT_FEATURES_DIM: int = 18
 
 
 # ==============================================================================

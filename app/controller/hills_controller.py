@@ -1,7 +1,7 @@
 # app/controller/hills_controller.py
 # Kontroler CRUD dla bazy skoczni narciarskich z obsługą 3-poziomowej hierarchii i wersjonowania
 
-from typing import Optional
+from typing import Optional, List
 import re
 from fastapi import APIRouter, Request, HTTPException, Depends
 from pydantic import BaseModel, Field
@@ -14,6 +14,7 @@ from app.services.hill_service import (
     get_hills_hierarchy,
     set_current_version,
     infer_hill_type,
+    merge_hills,
 )
 
 router = APIRouter(
@@ -52,6 +53,12 @@ class HillCreate(BaseModel):
     record_holder: Optional[str] = None
     meter_value: Optional[float] = None
     is_current: bool = Field(default=True, description="Czy ta wersja ma być oznaczona jako aktualna")
+
+
+class HillMergeRequest(BaseModel):
+    """Model żądania scalenia kilku zduplikowanych skoczni w jedną kanoniczną."""
+    source_hill_ids: List[str] = Field(..., min_length=2)
+    target_hill_id: Optional[str] = None
 
 
 # --- ENDPOINTY ---
@@ -259,3 +266,28 @@ async def delete_hill(
 
     clear_cache("long")
     return {"message": f"Usunięto wersję skoczni: {hill_id}"}
+
+
+@router.post("/merge")
+@limiter.limit("30/minute")
+async def merge_duplicate_hills(
+    request: Request,
+    payload: HillMergeRequest,
+    admin: dict = Depends(require_role(Role.ADMIN))
+):
+    """Scala wybrane skocznie (o tym samym profilu i HS) w jedną i synchronizuje bazę sesji (ADMIN)."""
+    db = request.app.database
+    try:
+        result = await merge_hills(
+            db=db,
+            source_hill_ids=payload.source_hill_ids,
+            target_hill_id=payload.target_hill_id,
+        )
+        return {
+            "message": f"Połączono {result['merged_count'] + 1} skocznie w {result['target_hill_id']} (zaktualizowano {result['updated_sessions']} sesji).",
+            **result,
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Błąd podczas łączenia skoczni: {e}")

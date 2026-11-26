@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from starlette import status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 
+from app.infrastructure.cache import get_cached_value, set_cached_value
+from app.infrastructure.limiter import limiter
 from app.repository.athlete_repository import AthleteRepository, get_athlete_repository
 from app.services.dictionaries.dictionary_service import DictionaryService, get_dictionary_service
 
@@ -24,22 +26,26 @@ def subtract_years(dt: datetime, years: int) -> datetime:
 
 
 # --- MODELE ---
+ALLOWED_ATHLETE_SORT_FIELDS = {"full_name", "country_code", "birthdate", "club", "price", "fis_code"}
+
+
 class AthleteSearchFilter(BaseModel):
-    search_name: Optional[str] = None
+    search_name: Optional[str] = Field(default=None, max_length=80)
     countries: Optional[List[str]] = []
     status: Optional[str] = "ACTIVE"  # Domyślnie aktywni
     seasons: Optional[List[str]] = []  # Sezony, w których skoczek startował
     categories: Optional[List[str]] = []  # Rodzaje zawodów (WC, COC, GP itd.)
-    age_min: Optional[int] = None
-    age_max: Optional[int] = None
+    age_min: Optional[int] = Field(default=None, ge=10, le=100)
+    age_max: Optional[int] = Field(default=None, ge=10, le=100)
     sort_by: Optional[str] = "full_name"  # Domyślne pole sortowania
     sort_order: int = 1  # 1 = rosnąco (A-Z), -1 = malejąco (Z-A)
-    limit: int = 20
-    skip: int = 0
+    limit: int = Field(default=20, ge=1, le=100)
+    skip: int = Field(default=0, ge=0)
 
 
 # --- NOWE ENDPOINTY (PAGINACJA I SŁOWNIKI) ---
 @router.post("/list")
+@limiter.limit("90/minute")
 async def get_athletes_list(
         request: Request,
         filters: AthleteSearchFilter,
@@ -50,10 +56,10 @@ async def get_athletes_list(
     query = {}
 
     if filters.search_name:
-        query["full_name"] = {"$regex": re.escape(filters.search_name), "$options": "i"}
+        query["full_name"] = {"$regex": re.escape(filters.search_name.strip()), "$options": "i"}
 
     if filters.countries:
-        query["country_code"] = {"$in": filters.countries}
+        query["country_code"] = {"$in": filters.countries[:50]}
 
     if filters.status:
         if filters.status == "ACTIVE":
@@ -64,9 +70,9 @@ async def get_athletes_list(
     # Filtr sezonów oraz rodzajów zawodów na bazie historii konkursów w 'sessions'
     session_match = {}
     if filters.seasons:
-        session_match["season"] = {"$in": filters.seasons}
+        session_match["season"] = {"$in": filters.seasons[:30]}
     if filters.categories:
-        session_match["category_code"] = {"$in": filters.categories}
+        session_match["category_code"] = {"$in": filters.categories[:20]}
 
     if session_match:
         matching_fis_codes = await db["sessions"].distinct("results_data.results.fis_code", session_match)
@@ -80,7 +86,7 @@ async def get_athletes_list(
         query["fis_code"] = {"$in": list(int_codes)}
 
     if filters.age_min is not None or filters.age_max is not None:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         birthdate_query = {}
 
         if filters.age_min is not None:
@@ -95,7 +101,7 @@ async def get_athletes_list(
             query["birthdate"] = birthdate_query
 
     # Szukamy, sortujemy (zależnie od tego, co kliknie użytkownik) i paginujemy
-    sort_field = filters.sort_by if filters.sort_by else "full_name"
+    sort_field = filters.sort_by if filters.sort_by in ALLOWED_ATHLETE_SORT_FIELDS else "full_name"
     sort_dir = filters.sort_order if filters.sort_order in [1, -1] else 1
 
     cursor = db["athletes"].find(query).sort(sort_field, sort_dir).skip(filters.skip).limit(filters.limit)
@@ -110,8 +116,13 @@ async def get_athletes_list(
 
 
 @router.get("/filters-meta")
+@limiter.limit("60/minute")
 async def get_athletes_filters_meta(request: Request):
-    """Zwraca listę dostępnych sezonów i kategorii zawodów do filtrów w bazie skoczków."""
+    """Zwraca listę dostępnych sezonów i kategorii zawodów do filtrów w bazie skoczków (cache 5 min)."""
+    cached = get_cached_value("medium", "athletes_filters_meta")
+    if cached is not None:
+        return cached
+
     db = request.app.database
     seasons = await db["sessions"].distinct("season", {"season": {"$ne": None}})
     sorted_seasons = sorted([str(s) for s in seasons if s], key=lambda x: str(x), reverse=True)
@@ -127,13 +138,16 @@ async def get_athletes_filters_meta(request: Request):
         {"code": "WJC", "name": "MŚ Juniorów (MŚJ)"},
     ]
 
-    return {
+    result = {
         "seasons": sorted_seasons,
         "categories": categories
     }
+    set_cached_value("medium", "athletes_filters_meta", result)
+    return result
 
 
 @router.get("/countries")
+@limiter.limit("120/minute")
 async def get_countries(request: Request):
     """Zwraca listę krajów ze słownika załadowanego w main.py."""
     countries_dict = request.app.state.dicts.get("countries", {})
@@ -143,7 +157,9 @@ async def get_countries(request: Request):
 
 # --- STARE ENDPOINTY (Zachowane dla kompatybilności repozytorium) ---
 @router.get("/find")
+@limiter.limit("60/minute")
 async def find_athlete(
+        request: Request,
         fis_code: int,
         repo: AthleteRepository = Depends(get_athlete_repository),
         dictionaries: DictionaryService = Depends(get_dictionary_service),
@@ -161,8 +177,10 @@ async def find_athlete(
 
 
 @router.get("/all")
+@limiter.limit("30/minute")
 async def get_all_athletes(
-        limit: int = 1000,
+        request: Request,
+        limit: int = Query(default=200, ge=1, le=500),
         repo: AthleteRepository = Depends(get_athlete_repository),
         dictionaries: DictionaryService = Depends(get_dictionary_service),
 ):
@@ -173,11 +191,13 @@ async def get_all_athletes(
 
 
 @router.get("/names")
-async def get_names(repo: AthleteRepository = Depends(get_athlete_repository)):
+@limiter.limit("60/minute")
+async def get_names(request: Request, repo: AthleteRepository = Depends(get_athlete_repository)):
     return await repo.get_all_names()
 
 
 @router.get("/{fis_code}/stats")
+@limiter.limit("60/minute")
 async def get_athlete_stats(
     fis_code: int,
     request: Request,

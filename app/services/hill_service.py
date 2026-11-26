@@ -558,3 +558,157 @@ async def resolve_event_hill_data(
 
     return None
 
+
+async def merge_hills(
+    db,
+    source_hill_ids: List[str],
+    target_hill_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Scala wybrane wersje skoczni (o tym samym profilu i rozmiarze HS) w jedną kanoniczną skocznię:
+    - Aktualizuje event_place / event_country / parametry skoczni w kolekcjach 'sessions' oraz 'sessions_review'
+    - Przenosi rekord, punkt K, łączną liczbę sesji i flagę is_current do wersji docelowej
+    - Usuwa zduplikowane dokumenty z kolekcji 'hills'
+    """
+    unique_ids = list(dict.fromkeys([hid.strip() for hid in source_hill_ids if hid and hid.strip()]))
+    if len(unique_ids) < 2:
+        raise ValueError("Wybierz co najmniej 2 skocznie do połączenia.")
+
+    hills_col = db["hills"]
+    docs = await hills_col.find({"_id": {"$in": unique_ids}}).to_list(length=100)
+    if len(docs) < 2:
+        raise ValueError("Nie znaleziono wskazanych skoczni w bazie danych.")
+
+    # Walidacja zgodności profilu (type) oraz rozmiaru (size)
+    types_set = {(d.get("type") or infer_hill_type(d.get("size"))).upper() for d in docs}
+    sizes_set = {int(d.get("size") or 0) for d in docs}
+    if len(types_set) > 1 or len(sizes_set) > 1:
+        raise ValueError(
+            f"Można łączyć wyłącznie skocznie o tym samym profilu i rozmiarze HS "
+            f"(wykryto profile: {sorted(types_set)}, rozmiary: {sorted(sizes_set)})."
+        )
+
+    # Wybór skoczni docelowej (kanonicznej)
+    if target_hill_id and any(d["_id"] == target_hill_id for d in docs):
+        target = next(d for d in docs if d["_id"] == target_hill_id)
+    else:
+        docs_sorted = sorted(
+            docs,
+            key=lambda d: (
+                1 if d.get("is_current") else 0,
+                int(d.get("total_sessions") or 0),
+                d.get("last_session_date") or "",
+                1 if d.get("record") else 0,
+            ),
+            reverse=True,
+        )
+        target = docs_sorted[0]
+
+    target_id = target["_id"]
+    target_place = target.get("place") or "Unknown"
+    target_country = (target.get("country_code") or "UNK").upper()
+    target_size = int(target.get("size") or 0)
+    target_unit = (target.get("unit") or "HS").upper()
+    target_type = (target.get("type") or infer_hill_type(target_size)).upper()
+
+    sources_to_remove = [d for d in docs if d["_id"] != target_id]
+    remove_ids = [d["_id"] for d in sources_to_remove]
+
+    # Konsolidacja metadanych (rekord, k_point, meter_value, łączne sesje)
+    best_record = target.get("record")
+    best_holder = target.get("record_holder")
+    best_k = target.get("k_point")
+    best_mv = target.get("meter_value")
+    best_year = target.get("year_built")
+    best_date = target.get("last_session_date") or ""
+    best_season = target.get("last_season") or ""
+    any_current = bool(target.get("is_current"))
+    total_sessions_sum = int(target.get("total_sessions") or 0)
+
+    for src in sources_to_remove:
+        total_sessions_sum += int(src.get("total_sessions") or 0)
+        if src.get("is_current"):
+            any_current = True
+        if src.get("k_point") is not None and best_k is None:
+            best_k = src.get("k_point")
+        if src.get("meter_value") is not None and best_mv is None:
+            best_mv = src.get("meter_value")
+        if src.get("year_built") is not None and best_year is None:
+            best_year = src.get("year_built")
+        src_rec = src.get("record")
+        if src_rec is not None and (best_record is None or float(src_rec) > float(best_record)):
+            best_record = float(src_rec)
+            if src.get("record_holder"):
+                best_holder = src.get("record_holder")
+        elif not best_holder and src.get("record_holder"):
+            best_holder = src.get("record_holder")
+        if (src.get("last_session_date") or "") > best_date:
+            best_date = src.get("last_session_date") or ""
+        if (src.get("last_season") or "") > best_season:
+            best_season = src.get("last_season") or ""
+
+    # Synchronizacja referencji w kolekcjach sessions oraz sessions_review
+    sessions_updated = 0
+    for src in sources_to_remove:
+        src_place = (src.get("place") or "").strip()
+        if not src_place:
+            continue
+        sess_filter = {
+            "event_place": {"$regex": f"^{re.escape(src_place)}$", "$options": "i"},
+            "$or": [
+                {"hillSize": target_size},
+                {"hillType": target_type},
+            ],
+        }
+        sess_update = {
+            "$set": {
+                "event_place": target_place,
+                "event_country": target_country,
+                "hillSize": target_size,
+                "hill_size_unit": target_unit,
+                "hillType": target_type,
+            }
+        }
+        res_s = await db["sessions"].update_many(sess_filter, sess_update)
+        res_r = await db["sessions_review"].update_many(sess_filter, sess_update)
+        sessions_updated += int(res_s.modified_count) + int(res_r.modified_count)
+
+    # Aktualizacja rekordu docelowego i usunięcie duplikatów
+    target_update: Dict[str, Any] = {
+        "place": target_place,
+        "country_code": target_country,
+        "size": target_size,
+        "unit": target_unit,
+        "type": target_type,
+        "is_current": any_current,
+        "total_sessions": total_sessions_sum,
+    }
+    if best_k is not None:
+        target_update["k_point"] = float(best_k)
+    if best_mv is not None:
+        target_update["meter_value"] = float(best_mv)
+    if best_year is not None:
+        target_update["year_built"] = int(best_year)
+    if best_record is not None:
+        target_update["record"] = float(best_record)
+    if best_holder:
+        target_update["record_holder"] = best_holder
+    if best_date:
+        target_update["last_session_date"] = best_date
+    if best_season:
+        target_update["last_season"] = best_season
+
+    await hills_col.update_one({"_id": target_id}, {"$set": target_update})
+    if remove_ids:
+        await hills_col.delete_many({"_id": {"$in": remove_ids}})
+
+    clear_cache("long")
+    clear_cache("short")
+    return {
+        "target_hill_id": target_id,
+        "target_place": target_place,
+        "merged_ids": remove_ids,
+        "merged_count": len(remove_ids),
+        "updated_sessions": sessions_updated,
+    }
+

@@ -1,13 +1,24 @@
 import asyncio
 import logging
 import datetime
+import re
 from typing import Optional, List, Dict, Any, Union
 from fastapi import APIRouter, Request, HTTPException, Query, BackgroundTasks, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from app.infrastructure.cache import get_cached_value, set_cached_value
 from app.infrastructure.limiter import limiter
 from app.services.weather.weather_service import get_weather_service
 from app.services.prediction.neural_network import get_prediction_manager
+from app.services.prediction.backtester import get_walk_forward_backtester
+from app.services.prediction.auto_tuner import get_auto_tuner_manager
+from app.services.prediction.hyperparams_service import (
+    get_active_hyperparams_bundle,
+    get_hyperparams_history,
+    load_active_hyperparams_from_db,
+    reset_hyperparams_to_default,
+)
+from app.services.prediction.prediction_config import WEEKEND_LOOKBACK_DAYS
 from app.services.prediction.calendar_service import get_next_upcoming_competition
 from app.auth import require_role
 from app.services.auth_service import Role
@@ -47,8 +58,8 @@ class PredictionRequest(BaseModel):
     date: Optional[str] = None
     time: Optional[str] = "15:00"
     weather: Optional[WeatherPayload] = None
-    fis_codes: Optional[List[Union[int, str]]] = None  # Własna lista startowa (jeśli podano)
-    num_simulations: int = 100
+    fis_codes: Optional[List[Union[int, str]]] = Field(default=None, max_length=150)  # Własna lista startowa (jeśli podano)
+    num_simulations: int = Field(default=100, ge=10, le=400)
 
 
 # --- ENDPOINTY ---
@@ -69,6 +80,17 @@ async def get_next_competition(
     return await get_next_upcoming_competition(db, target_category=category, gender=gender, force_refresh=force_refresh)
 
 
+async def _get_weather_cached_async(place: str, date_str: Optional[str], time_str: Optional[str]) -> Dict[str, Any]:
+    cache_key = f"weather_{(place or '').strip().lower()}_{date_str or ''}_{time_str or '15:00'}"
+    cached = get_cached_value("short", cache_key)
+    if cached is not None:
+        return cached
+    ws = get_weather_service()
+    res = await asyncio.to_thread(ws.get_weather, place, date_str=date_str, time_str=time_str)
+    set_cached_value("short", cache_key, res)
+    return res
+
+
 @router.get("/weather")
 @limiter.limit("60/minute")
 async def get_hill_weather(
@@ -77,9 +99,8 @@ async def get_hill_weather(
     date: Optional[str] = Query(None, description="Data w formacie YYYY-MM-DD"),
     time: Optional[str] = Query("15:00", description="Godzina w formacie HH:MM")
 ):
-    """Pobiera prognozę lub dane historyczne z darmowego API Open-Meteo."""
-    ws = get_weather_service()
-    return ws.get_weather(place, date_str=date, time_str=time)
+    """Pobiera prognozę lub dane historyczne z darmowego API Open-Meteo (cache 1 min)."""
+    return await _get_weather_cached_async(place, date, time)
 
 
 @router.get("/available-athletes")
@@ -165,8 +186,7 @@ async def predict_competition(
     if payload.weather:
         weather_dict = payload.weather.model_dump()
     else:
-        ws = get_weather_service()
-        weather_dict = ws.get_weather(payload.hill_place, payload.date, payload.time)
+        weather_dict = await _get_weather_cached_async(payload.hill_place, payload.date, payload.time)
 
     # 2. Data konkursu
     target_date = datetime.date.today()
@@ -177,20 +197,20 @@ async def predict_competition(
             target_date = datetime.date.today()
 
     target_date_str = target_date.isoformat()
-    date_minus_3_str = (target_date - datetime.timedelta(days=3)).isoformat()
+    date_minus_window_str = (target_date - datetime.timedelta(days=WEEKEND_LOOKBACK_DAYS)).isoformat()
 
-    # 3. Automatyczne wykrycie sesji z bieżącego weekendu (kwalifikacje, treningi, sobotni konkurs)
+    # 3. Automatyczne wykrycie sesji z bieżącego weekendu (kwalifikacje, treningi, wcześniejszy konkurs)
     weekend_sessions_info = []
     weekend_sessions = []
     try:
         clean_place = payload.hill_place.strip()
         weekend_query = {
-            "event_place": {"$regex": f"^{clean_place}$", "$options": "i"},
-            "date": {"$gte": date_minus_3_str, "$lte": target_date_str},
+            "event_place": {"$regex": f"^{re.escape(clean_place)}$", "$options": "i"},
+            "date": {"$gte": date_minus_window_str, "$lte": target_date_str},
             "results_data.results": {"$exists": True, "$ne": []}
         }
         cursor = db["sessions"].find(weekend_query).sort([("date", 1), ("time", 1)])
-        found_sessions = await cursor.to_list(15)
+        found_sessions = await cursor.to_list(25)
 
         # Odfiltruj ewentualną sesję tego samego konkursu o tej samej godzinie
         for s in found_sessions:
@@ -252,10 +272,11 @@ async def predict_competition(
         if not athletes:
             athletes = await athletes_col.find({"status": "Active"}).limit(100).to_list(100)
 
-    # 5. Uruchom inferencję sieci neuronowej
+    # 5. Uruchom inferencję sieci neuronowej w wątku roboczym (nie blokuje pętli asyncio)
     target_tier = (payload.competition_type or "WC").upper().strip()
     try:
-        predictions = manager.predict(
+        predictions = await asyncio.to_thread(
+            manager.predict,
             athletes=athletes,
             hill_size=payload.hill_size,
             hill_type=payload.hill_type,
@@ -264,11 +285,12 @@ async def predict_competition(
             target_date=target_date,
             weekend_sessions=weekend_sessions,
             num_simulations=payload.num_simulations,
-            target_category=target_tier
+            target_category=target_tier,
+            target_time=(payload.time or None),
         )
     except Exception as e:
-        logger.error(f"Błąd podczas generowania predykcji: {e}")
-        raise HTTPException(status_code=500, detail=f"Błąd sieci neuronowej: {str(e)}")
+        logger.exception("Błąd podczas generowania predykcji")
+        raise HTTPException(status_code=500, detail="Błąd podczas generowania predykcji sieci neuronowej.")
 
     volatility_val = weather_dict.get("wind_volatility_index")
     if volatility_val is None:
@@ -314,16 +336,37 @@ async def get_model_info(request: Request):
     }
 
 
+_SESSION_PROJECTION = {
+    "_id": 1,
+    "raceId": 1,
+    "season": 1,
+    "date": 1,
+    "time": 1,
+    "hillSize": 1,
+    "hillType": 1,
+    "event_place": 1,
+    "session_type": 1,
+    "race_category": 1,
+    "category_code": 1,
+    "results_data": 1,
+    "weather": 1,
+}
+
+
 async def _run_retraining_task(db):
     manager = get_prediction_manager()
     try:
+        manager.training_message = "Wczytywanie aktywnych hiperparametrów z MongoDB..."
+        await load_active_hyperparams_from_db(db)
         manager.training_message = "Pobieranie sesji z bazy MongoDB..."
         cursor = db["sessions"].find(
             {"results_data.results": {"$exists": True, "$ne": []}},
-            {"date": 1, "time": 1, "hillSize": 1, "hillType": 1, "event_place": 1, "session_type": 1, "race_category": 1, "category_code": 1, "results_data": 1, "weather": 1}
+            _SESSION_PROJECTION,
         )
-        sessions = await cursor.to_list(length=5000)
+        sessions = await cursor.to_list(length=10000)
         await asyncio.to_thread(manager.train, sessions)
+        from app.services.prediction.ml_storage import save_nn_artifacts_to_db
+        await save_nn_artifacts_to_db(db, manager)
     except Exception as e:
         manager.mark_training_failed(str(e))
         logger.error(f"Błąd zadania w tle trenowania modelu: {e}")
@@ -345,3 +388,134 @@ async def trigger_retrain(
     manager.mark_training_started()
     background_tasks.add_task(_run_retraining_task, db)
     return {"message": "Trening sieci neuronowej został uruchomiony w tle."}
+
+
+async def _run_backtest_task(db):
+    backtester = get_walk_forward_backtester()
+    try:
+        await load_active_hyperparams_from_db(db)
+        backtester.message = "Pobieranie sesji historycznych do walidacji Walk-Forward..."
+        cursor = db["sessions"].find(
+            {"results_data.results": {"$exists": True, "$ne": []}},
+            _SESSION_PROJECTION,
+        )
+        sessions = await cursor.to_list(length=10000)
+        report = await asyncio.to_thread(backtester.run_backtest, sessions)
+        from app.services.prediction.ml_storage import save_json_artifact_to_db
+        await save_json_artifact_to_db(db, "backtest_results", report)
+    except Exception as e:
+        backtester.is_running = False
+        backtester.error = str(e)
+        backtester.current_stage = "error"
+        backtester.message = f"Błąd backtestu: {e}"
+        logger.error(f"Błąd zadania w tle Walk-Forward Backtest: {e}")
+
+
+@router.get("/backtest/status")
+@limiter.limit("60/minute")
+async def get_backtest_status(request: Request):
+    """Zwraca bieżący postęp oraz ostatnie zapisane wyniki walidacji Walk-Forward."""
+    return get_walk_forward_backtester().get_status()
+
+
+@router.post("/backtest/start")
+@limiter.limit("5/minute")
+async def trigger_backtest(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    admin: dict = Depends(require_role(Role.ADMIN))
+):
+    """Uruchamia kroczącą walidację historyczną Walk-Forward po sezonach (wymaga uprawnień ADMIN)."""
+    backtester = get_walk_forward_backtester()
+    if backtester.is_running:
+        raise HTTPException(status_code=400, detail="Backtest Walk-Forward jest już w toku.")
+
+    db = request.app.database
+    backtester.mark_started()
+    background_tasks.add_task(_run_backtest_task, db)
+    return {"message": "Krocząca walidacja Walk-Forward została uruchomiona w tle."}
+
+
+# --- HIPERPARAMETRY MONGODB & AUTO-TUNER ---
+
+@router.get("/hyperparams")
+@limiter.limit("60/minute")
+async def get_prediction_hyperparams(request: Request):
+    """Zwraca aktywne hiperparametry sieci z MongoDB oraz historię strojeń."""
+    db = request.app.database
+    await load_active_hyperparams_from_db(db)
+    bundle = get_active_hyperparams_bundle()
+    bundle["history"] = await get_hyperparams_history(db, limit=6)
+    return bundle
+
+
+@router.post("/hyperparams/reset")
+@limiter.limit("10/minute")
+async def reset_prediction_hyperparams(
+    request: Request,
+    admin: dict = Depends(require_role(Role.ADMIN)),
+):
+    """Przywraca domyślne hiperparametry predykcji w MongoDB (wymaga ADMIN)."""
+    db = request.app.database
+    bundle = await reset_hyperparams_to_default(db)
+    bundle["history"] = await get_hyperparams_history(db, limit=6)
+    return {"message": "Przywrócono domyślne hiperparametry w MongoDB.", **bundle}
+
+
+async def _run_autotune_task(db):
+    tuner = get_auto_tuner_manager()
+    try:
+        tuner.message = "Pobieranie sesji z MongoDB do 2-etapowego Auto-Tuningu..."
+        cursor = db["sessions"].find(
+            {"results_data.results": {"$exists": True, "$ne": []}},
+            _SESSION_PROJECTION,
+        )
+        sessions = await cursor.to_list(length=10000)
+        await tuner.run_job(db=db, sessions=sessions)
+    except Exception as e:
+        tuner.is_running = False
+        tuner.error = str(e)
+        tuner.stage = "error"
+        tuner.message = f"Błąd Auto-Tunera: {e}"
+        logger.error(f"Błąd zadania w tle Auto-Tunera: {e}")
+
+
+@router.get("/autotune/status")
+@limiter.limit("60/minute")
+async def get_autotune_status(request: Request):
+    """Zwraca bieżący postęp oraz ostatnie wyniki 2-etapowego Auto-Tunera."""
+    return get_auto_tuner_manager().get_status()
+
+
+@router.post("/autotune/start")
+@limiter.limit("5/minute")
+async def trigger_autotune(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    admin: dict = Depends(require_role(Role.ADMIN)),
+):
+    """Uruchamia automatyczne 2-etapowe strojenie parametrów z walidacją holdout i zapisem w MongoDB."""
+    tuner = get_auto_tuner_manager()
+    if tuner.is_running:
+        raise HTTPException(status_code=400, detail="Auto-Tuning sieci neuronowej jest już w toku.")
+    if get_prediction_manager().is_training or get_walk_forward_backtester().is_running:
+        raise HTTPException(status_code=400, detail="Poczekaj na zakończenie aktywnego treningu lub backtestu.")
+
+    db = request.app.database
+    tuner.mark_started()
+    background_tasks.add_task(_run_autotune_task, db)
+    return {"message": "Uruchomiono 2-etapowy Auto-Tuning z zapisem w MongoDB."}
+
+
+@router.post("/autotune/stop")
+@limiter.limit("30/minute")
+async def stop_autotune(
+    request: Request,
+    admin: dict = Depends(require_role(Role.ADMIN)),
+):
+    """Bezpiecznie zatrzymuje Auto-Tuner po zakończeniu bieżącej próby."""
+    tuner = get_auto_tuner_manager()
+    if not tuner.is_running:
+        return {"message": "Auto-Tuner nie jest obecnie uruchomiony."}
+    tuner.stop()
+    return {"message": "Wysłano sygnał zatrzymania Auto-Tunera."}

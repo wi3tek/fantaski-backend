@@ -24,7 +24,11 @@ from app.services.scrapers.results_job_manager import (
 )
 from app.services.scrapers.fis_athletes_scraper import fetch_all_athletes_by_chunks
 from app.services.athletes_esm_prices import update_esm_prices
-from app.services.scrapers.pdf_training_scraper import process_all_trainings_pdf, process_single_pdf_debug
+from app.services.scrapers.pdf_training_scraper import (
+    get_pdf_training_job_manager,
+    process_all_trainings_pdf,
+    process_single_pdf_debug,
+)
 from app.services.weather.weather_enricher import get_weather_enricher
 from app.services.scrapers.nightly_batch_scraper import get_nightly_batch_scraper
 
@@ -790,7 +794,74 @@ async def reject_all_session_reviews(request: Request):
 # MODUŁ PDF - TRENINGI I SERIE PRÓBNE
 # ==========================================
 class RefreshTrainingsRequest(BaseModel):
-    season: str = None
+    season: Optional[str] = None
+    season_from: Optional[int] = None
+    season_to: Optional[int] = None
+    categories: Optional[List[str]] = None
+    force_reprocess: bool = False
+
+
+async def _run_refresh_trainings_background(
+    db,
+    season: Optional[str],
+    season_from: Optional[int],
+    season_to: Optional[int],
+    categories: Optional[List[str]],
+    force_reprocess: bool,
+):
+    manager = get_pdf_training_job_manager()
+    await manager.run_job(
+        db=db,
+        season=season,
+        season_from=season_from,
+        season_to=season_to,
+        categories=categories,
+        force_reprocess=force_reprocess,
+    )
+
+
+@router.get("/refresh-trainings/status")
+@limiter.limit("120/minute")
+async def get_refresh_trainings_status(request: Request):
+    """Zwraca bieżący postęp asynchronicznej ekstrakcji PDF treningów."""
+    return get_pdf_training_job_manager().get_status()
+
+
+@router.post("/refresh-trainings/start")
+@limiter.limit("30/minute")
+async def start_refresh_trainings(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    payload: RefreshTrainingsRequest = None,
+):
+    """Uruchamia pobieranie i analizę plików PDF treningów w tle z bezpiecznym zatrzymywaniem."""
+    manager = get_pdf_training_job_manager()
+    if manager.is_running:
+        raise HTTPException(status_code=400, detail="Ekstrakcja plików PDF treningów jest już w toku.")
+
+    db = request.app.database
+    manager.mark_started()
+    background_tasks.add_task(
+        _run_refresh_trainings_background,
+        db=db,
+        season=payload.season if payload else None,
+        season_from=payload.season_from if payload else None,
+        season_to=payload.season_to if payload else None,
+        categories=payload.categories if payload else None,
+        force_reprocess=payload.force_reprocess if payload else False,
+    )
+    return {"message": "Ekstrakcja plików PDF treningów została uruchomiona w tle."}
+
+
+@router.post("/refresh-trainings/stop")
+@limiter.limit("30/minute")
+async def stop_refresh_trainings(request: Request):
+    """Bezpiecznie zatrzymuje aktywną ekstrakcję plików PDF treningów."""
+    manager = get_pdf_training_job_manager()
+    if not manager.is_running:
+        return {"message": "Żadne zadanie ekstrakcji PDF nie jest obecnie aktywne."}
+    manager.stop()
+    return {"message": "Wysłano sygnał bezpiecznego zatrzymania ekstrakcji PDF."}
 
 
 @router.post("/refresh-trainings")
@@ -798,8 +869,14 @@ class RefreshTrainingsRequest(BaseModel):
 async def extract_trainings_pdf(request: Request, payload: RefreshTrainingsRequest = None):
     """Przeszukuje bazę, pobiera pliki PDF z treningami i tworzy nowe sesje w MongoDB."""
     db = request.app.database
-    season = payload.season if payload else None
-    return await process_all_trainings_pdf(db, season=season)
+    return await process_all_trainings_pdf(
+        db,
+        season=payload.season if payload else None,
+        season_from=payload.season_from if payload else None,
+        season_to=payload.season_to if payload else None,
+        categories=payload.categories if payload else None,
+        force_reprocess=payload.force_reprocess if payload else False,
+    )
 
 
 class CheckerRequest(BaseModel):
@@ -854,13 +931,28 @@ def analyze_pdf_with_pdfplumber(pdf_bytes: bytes):
 @router.post("/test-pdfplumber")
 async def test_pdfplumber_endpoint(req: PdfplumberRequest):
     """
-    Endpoint debugujący. Pobiera PDF z podanego URL i sprawdza,
+    Endpoint debugujący. Pobiera PDF z podanego publicznego URL i sprawdza,
     jak pdfplumber widzi w nim tabele.
     """
+    from urllib.parse import urlparse
+    import ipaddress
+    import socket
+
+    parsed = urlparse((req.url or "").strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return {"success": False, "error": "Dozwolone są wyłącznie publiczne adresy HTTP/HTTPS."}
+
+    try:
+        resolved_ip = ipaddress.ip_address(socket.gethostbyname(parsed.hostname))
+        if resolved_ip.is_private or resolved_ip.is_loopback or resolved_ip.is_link_local or resolved_ip.is_reserved:
+            return {"success": False, "error": "Niedozwolony adres docelowy."}
+    except Exception:
+        return {"success": False, "error": "Nie można zweryfikować nazwy hosta."}
+
     try:
         # 1. Pobieramy plik z URL
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            response = await client.get(req.url,headers=config.DEFAULT_HEADERS)
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+            response = await client.get(req.url, headers=config.DEFAULT_HEADERS)
             response.raise_for_status()
 
             # Sprawdzamy czy to faktycznie PDF
@@ -879,10 +971,10 @@ async def test_pdfplumber_endpoint(req: PdfplumberRequest):
             "results": analysis_result
         }
 
-    except Exception as e:
+    except Exception:
         return {
             "success": False,
-            "error": str(e)
+            "error": "Nie udało się pobrać lub przeanalizować wskazanego dokumentu PDF."
         }
 
 

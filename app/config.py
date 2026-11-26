@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # Environment & Dev security
     ENVIRONMENT: str = default_env
-    ENABLE_DEV_LOGIN: bool = True
+    ENABLE_DEV_LOGIN: bool = default_env != "production"
 
     # Legacy basic auth users
     API_USERS_RAW: str = '{}'

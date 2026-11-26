@@ -42,6 +42,8 @@ class UserResponse(BaseModel):
 def serialize_user(user: dict) -> dict:
     created = user.get("created_at")
     last_login = user.get("last_login")
+    esm = user.get("esm_integration") or {}
+    my_team = esm.get("my_team") or {}
     return {
         "id": str(user.get("_id", user.get("id"))),
         "email": user.get("email", ""),
@@ -50,7 +52,16 @@ def serialize_user(user: dict) -> dict:
         "role": user.get("role", Role.USER),
         "is_active": user.get("is_active", True),
         "created_at": created.isoformat() if hasattr(created, "isoformat") else str(created) if created else None,
-        "last_login": last_login.isoformat() if hasattr(last_login, "isoformat") else str(last_login) if last_login else None
+        "last_login": last_login.isoformat() if hasattr(last_login, "isoformat") else str(last_login) if last_login else None,
+        "esm_summary": {
+            "connected": bool(esm.get("connected") and esm.get("team_id")),
+            "team_id": esm.get("team_id"),
+            "league_id": esm.get("league_id"),
+            "team_name": my_team.get("team_name"),
+            "value": my_team.get("value"),
+            "total_points": my_team.get("total_points"),
+            "last_synced_at": esm.get("last_synced_at"),
+        },
     }
 
 @router.post("/google")
@@ -86,13 +97,12 @@ async def login_with_google(req: GoogleLoginRequest, request: Request):
 @limiter.limit("15/minute")
 async def dev_login(req: DevLoginRequest, request: Request):
     """
-    Logowanie deweloperskie (ułatwia testowanie bez konieczności konfiguracji Google Client ID w dev).
-    Automatycznie przydziela uprawnienia administracyjne dla adresu wskazanego w INITIAL_ADMIN_EMAIL.
+    Logowanie deweloperskie (wyłączone na produkcji, służy wyłącznie do testów lokalnych/dev).
     """
-    if getattr(settings, "ENVIRONMENT", "development") == "production" and not getattr(settings, "ENABLE_DEV_LOGIN", False):
+    if getattr(settings, "ENVIRONMENT", "development") == "production" or not getattr(settings, "ENABLE_DEV_LOGIN", False):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Logowanie testowe jest wyłączone na środowisku produkcyjnym."
+            detail="Logowanie testowe jest wyłączone na tym środowisku."
         )
     db = request.app.database
     user_info = {
@@ -146,6 +156,12 @@ async def update_my_profile(
 
     if req.picture is not None:
         trimmed_pic = req.picture.strip()
+        if trimmed_pic:
+            if len(trimmed_pic) > 500 or not (trimmed_pic.startswith("https://") or trimmed_pic.startswith("http://")):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Adres avatara musi zaczynać się od http:// lub https:// (maks. 500 znaków)."
+                )
         update_data["picture"] = trimmed_pic
 
     if not update_data:
@@ -172,6 +188,7 @@ async def update_my_profile(
     }
 
 @router.get("/users")
+@limiter.limit("30/minute")
 async def list_users(
     request: Request,
     admin: dict = Depends(require_role(Role.ADMIN))
@@ -179,7 +196,23 @@ async def list_users(
     """Lista wszystkich użytkowników w systemie (dostęp tylko dla ADMIN)."""
     db = request.app.database
     users = []
-    async for u in db["users"].find().sort("created_at", -1):
+    projection = {
+        "email": 1,
+        "name": 1,
+        "picture": 1,
+        "role": 1,
+        "is_active": 1,
+        "created_at": 1,
+        "last_login": 1,
+        "esm_integration.connected": 1,
+        "esm_integration.team_id": 1,
+        "esm_integration.league_id": 1,
+        "esm_integration.last_synced_at": 1,
+        "esm_integration.my_team.team_name": 1,
+        "esm_integration.my_team.value": 1,
+        "esm_integration.my_team.total_points": 1,
+    }
+    async for u in db["users"].find({}, projection).sort("created_at", -1).limit(500):
         users.append(serialize_user(u))
     return users
 
