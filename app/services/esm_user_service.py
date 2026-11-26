@@ -122,6 +122,10 @@ def match_esm_player_to_db(
         active = [c for c in cands if c.get("status") == "Active"]
         if active:
             cands = active
+    if len(cands) > 1:
+        priced = [c for c in cands if c.get("price") is not None]
+        if priced:
+            cands = priced
     return cands[0]
 
 
@@ -157,13 +161,15 @@ def parse_esm_team_payload(
                 continue
             matched = match_esm_player_to_db(p, countries_dict, athletes_by_ioc, all_athletes)
             ioc = (matched.get("country_code") if matched else None) or _resolve_ioc_from_esm(p, countries_dict)
+            db_price = matched.get("price") if matched else None
+            resolved_price = db_price if db_price is not None else p.get("price")
             entry = {
                 "esm_id": p.get("_id"),
                 "esm_fullname": p.get("fullname") or f"{p.get('name', '')} {p.get('surname', '')}".strip(),
                 "fis_code": matched.get("fis_code") if matched else None,
                 "fis_name": matched.get("full_name") if matched else None,
                 "country": ioc,
-                "price": p.get("price") if p.get("price") is not None else (matched.get("price") if matched else None),
+                "price": resolved_price,
                 "is_captain": bool(p.get("isPlayerCaptain")),
                 "group": g_idx,
             }
@@ -172,21 +178,127 @@ def parse_esm_team_payload(
             else:
                 bench.append(entry)
 
+    all_players = starters + bench
+    priced_values = [float(x["price"]) for x in all_players if isinstance(x.get("price"), (int, float))]
+    squad_value = round(sum(priced_values), 2) if priced_values else None
+
     fixture_pts = team_obj.get("fixturePoints") or {}
     total_pts = sum(float(v) for v in fixture_pts.values() if isinstance(v, (int, float))) if isinstance(fixture_pts, dict) else 0.0
 
+    raw_team_value = team_obj.get("Value")
     return {
         "team_id": str(team_obj.get("_id") or ""),
         "team_name": str(team_obj.get("name") or "Drużyna ESM"),
         "league_id": str(team_obj.get("league") or league_id),
-        "value": team_obj.get("Value"),
+        "value": raw_team_value if raw_team_value is not None else squad_value,
+        "squad_value": squad_value,
         "income": team_obj.get("Income"),
         "total_points": round(total_pts, 1),
         "starters": starters,
         "bench": bench,
-        "all_players": starters + bench,
+        "all_players": all_players,
         "synced_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+
+
+def _compute_squad_value(players: List[Dict[str, Any]]) -> Optional[float]:
+    vals = [float(x["price"]) for x in players if isinstance(x.get("price"), (int, float))]
+    return round(sum(vals), 2) if vals else None
+
+
+async def refresh_esm_teams_prices_from_db(
+    db,
+    teams: List[Optional[Dict[str, Any]]],
+    countries_dict: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Aktualizuje ceny zawodników (oraz brakujące dopasowania fis_code/fis_name) w obiektach drużyn ESM
+    bezpośrednio na podstawie bieżącej kolekcji `athletes` w MongoDB.
+    """
+    valid_teams = [t for t in teams if isinstance(t, dict)]
+    if not valid_teams:
+        return
+
+    fis_codes = set()
+    needs_full_lookup = False
+    for t in valid_teams:
+        for group_key in ("starters", "bench", "all_players"):
+            for p in t.get(group_key) or []:
+                if not isinstance(p, dict):
+                    continue
+                if p.get("fis_code") is not None:
+                    try:
+                        fis_codes.add(int(p["fis_code"]))
+                    except (TypeError, ValueError):
+                        needs_full_lookup = True
+                else:
+                    needs_full_lookup = True
+
+    by_fis: Dict[int, Dict[str, Any]] = {}
+    athletes_by_ioc: Dict[str, List[Dict[str, Any]]] = {}
+    all_athletes: List[Dict[str, Any]] = []
+
+    if needs_full_lookup:
+        athletes_by_ioc, all_athletes = await _build_athletes_lookup(db)
+        for item in all_athletes:
+            if item.get("fis_code") is not None:
+                try:
+                    by_fis[int(item["fis_code"])] = item
+                except (TypeError, ValueError):
+                    pass
+    elif fis_codes:
+        cursor = db["athletes"].find(
+            {"fis_code": {"$in": list(fis_codes)}},
+            {"fis_code": 1, "full_name": 1, "country_code": 1, "price": 1},
+        )
+        async for a in cursor:
+            if a.get("fis_code") is not None:
+                try:
+                    by_fis[int(a["fis_code"])] = a
+                except (TypeError, ValueError):
+                    pass
+
+    for t in valid_teams:
+        for group_key in ("starters", "bench", "all_players"):
+            players = t.get(group_key) or []
+            for p in players:
+                if not isinstance(p, dict):
+                    continue
+                matched_doc: Optional[Dict[str, Any]] = None
+                if p.get("fis_code") is not None:
+                    try:
+                        matched_doc = by_fis.get(int(p["fis_code"]))
+                    except (TypeError, ValueError):
+                        matched_doc = None
+                if matched_doc is None and all_athletes:
+                    synthetic_player = {
+                        "fullname": p.get("esm_fullname") or p.get("fis_name") or "",
+                        "teamKey": p.get("country") or "",
+                        "team": p.get("country") or "",
+                    }
+                    matched_doc = match_esm_player_to_db(
+                        synthetic_player,
+                        countries_dict or {},
+                        athletes_by_ioc,
+                        all_athletes,
+                    )
+                    if matched_doc:
+                        if p.get("fis_code") is None and matched_doc.get("fis_code") is not None:
+                            p["fis_code"] = matched_doc["fis_code"]
+                        if not p.get("fis_name") and matched_doc.get("full_name"):
+                            p["fis_name"] = matched_doc["full_name"]
+                        if not p.get("country") and matched_doc.get("country_code"):
+                            p["country"] = matched_doc["country_code"]
+
+                if matched_doc and matched_doc.get("price") is not None:
+                    p["price"] = matched_doc["price"]
+
+        all_players = t.get("all_players") or ((t.get("starters") or []) + (t.get("bench") or []))
+        squad_val = _compute_squad_value(all_players)
+        if squad_val is not None:
+            t["squad_value"] = squad_val
+            if t.get("value") is None:
+                t["value"] = squad_val
 
 
 def decode_esm_token_email(token: str) -> Optional[str]:
@@ -458,6 +570,11 @@ async def build_user_esm_status_payload(
     outgoing_requests = [_public_friend_summary(users_map[uid]) for uid in out_ids if uid in users_map]
 
     is_connected = bool(esm.get("connected") and esm.get("team_id"))
+    my_team = dict(esm["my_team"]) if (is_connected and isinstance(esm.get("my_team"), dict)) else None
+
+    teams_to_hydrate: List[Optional[Dict[str, Any]]] = [my_team] + friends_payload
+    await refresh_esm_teams_prices_from_db(db, teams_to_hydrate, countries_dict=countries_dict)
+
     return {
         "connected": is_connected,
         "has_token": False,
@@ -465,7 +582,7 @@ async def build_user_esm_status_payload(
         "league_id": esm.get("league_id") or DEFAULT_ESM_LEAGUE_ID,
         "team_id": esm.get("team_id") if is_connected else None,
         "assigned_at": esm.get("assigned_at") if is_connected else None,
-        "my_team": esm.get("my_team") if is_connected else None,
+        "my_team": my_team,
         "friends": friends_payload,
         "incoming_requests": incoming_requests,
         "outgoing_requests": outgoing_requests,

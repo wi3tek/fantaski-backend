@@ -242,7 +242,14 @@ async def get_active_athletes_pool(
 
     docs = await db["athletes"].find(
         flt,
-        {"fis_code": 1, "full_name": 1, "country_code": 1, "price": 1, "wc_points": 1},
+        {
+            "fis_code": 1,
+            "full_name": 1,
+            "country_code": 1,
+            "price": 1,
+            "wc_points": 1,
+            "competitor_id_from_url": 1,
+        },
     ).sort([("price", -1), ("full_name", 1)]).to_list(length=1600)
 
     needle = q.strip().lower()
@@ -258,6 +265,7 @@ async def get_active_athletes_pool(
             "full_name": name,
             "country_code": cc,
             "price": a.get("price"),
+            "competitor_id_from_url": a.get("competitor_id_from_url"),
         })
     return out[:150]
 

@@ -32,7 +32,13 @@ def _oid_or_400(raw_id: str, label: str = "użytkownika") -> ObjectId:
 async def get_my_esm_status(request: Request, current_user: dict = Depends(get_current_user)):
     """Zwraca status integracji ESM przypisanej przez admina oraz listę znajomych FantaSKI i zaproszeń."""
     db = request.app.database
-    return await build_user_esm_status_payload(db=db, user_doc=current_user, refresh_friends_live=False)
+    countries_dict = (getattr(request.app.state, "dicts", {}) or {}).get("countries", {})
+    return await build_user_esm_status_payload(
+        db=db,
+        user_doc=current_user,
+        countries_dict=countries_dict,
+        refresh_friends_live=False,
+    )
 
 
 @router.post("/sync")

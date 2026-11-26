@@ -16,7 +16,11 @@ from app.services.stats.generate_standings import generate_standings_from_db
 from app.services.dictionaries.dictionary_service import DictionaryService, get_dictionary_service
 from app.infrastructure.cache import get_cached_value, set_cached_value
 from app.services.scrapers.scraper import fetch_fis_calendar
-from app.services.prediction.calendar_service import parse_date_range_start, parse_date_range_end
+from app.services.prediction.calendar_service import (
+    get_next_upcoming_competition,
+    parse_date_range_start,
+    parse_date_range_end,
+)
 from app.services.draft_service import TCS_VENUES, RAW_AIR_VENUES, PLANICA_7_VENUES, _tournament_default_bounds
 
 router = APIRouter(
@@ -357,3 +361,153 @@ async def get_fis_season_calendar(
     }
     set_cached_value("medium", cache_key, result)
     return result
+
+
+def _extract_session_podium(results_list: list, limit: int = 3) -> list:
+    """Wyciąga TOP N sklasyfikowanych zawodników z wyników sesji."""
+    ranked = []
+    for row in results_list or []:
+        if not isinstance(row, dict):
+            continue
+        raw_rank = row.get("rank")
+        try:
+            rank_num = int(raw_rank)
+        except (TypeError, ValueError):
+            continue
+        if rank_num <= 0:
+            continue
+        ranked.append((
+            rank_num,
+            {
+                "rank": rank_num,
+                "fis_code": row.get("fis_code"),
+                "name": row.get("name") or "",
+                "country": row.get("country") or "",
+                "total_points": row.get("total_points") if row.get("total_points") is not None else row.get("competition_points"),
+                "distances": row.get("distances") or [],
+            },
+        ))
+    ranked.sort(key=lambda item: item[0])
+    return [item[1] for item in ranked[:limit]]
+
+
+async def build_dashboard_payload(db, dictionaries: DictionaryService) -> dict:
+    """Buduje skonsolidowane dane na ekran startowy (najbliższe zawody, ostatnie wyniki, TOP 5 PŚ)."""
+    async def _safe_next_comp():
+        try:
+            return await get_next_upcoming_competition(db, target_category="WC", gender="M", force_refresh=False)
+        except Exception:
+            return {"found": False}
+
+    recent_query = {
+        "results_data.results.0": {"$exists": True},
+        "is_cancelled": {"$ne": True},
+        "results_data.is_cancelled": {"$ne": True},
+    }
+    recent_projection = {
+        "_id": 1,
+        "title": 1,
+        "date": 1,
+        "time": 1,
+        "event_place": 1,
+        "event_country": 1,
+        "category_code": 1,
+        "session_type": 1,
+        "hillSize": 1,
+        "hillType": 1,
+        "season": 1,
+        "results_data.results": 1,
+    }
+
+    async def _fetch_recent_sessions():
+        return await (
+            db["sessions"]
+            .find(recent_query, recent_projection)
+            .sort([("date", -1), ("time", -1)])
+            .limit(8)
+            .to_list(length=8)
+        )
+
+    async def _find_latest_wc_season():
+        doc = await db["sessions"].find_one(
+            {
+                "category_code": "WC",
+                "session_type": "COMPETITION",
+                "is_cancelled": {"$ne": True},
+                "results_data.is_cancelled": {"$ne": True},
+                "results_data.results.0": {"$exists": True},
+            },
+            {"season": 1},
+            sort=[("date", -1), ("time", -1)],
+        )
+        if doc and doc.get("season"):
+            return str(doc["season"]).strip()
+        today = datetime.date.today()
+        return str(today.year + (1 if today.month >= 7 else 0))
+
+    next_comp, recent_docs, active_season = await asyncio.gather(
+        _safe_next_comp(),
+        _fetch_recent_sessions(),
+        _find_latest_wc_season(),
+    )
+
+    standings_res = await generate_standings_from_db(db, active_season, "WC", dictionaries)
+    top5 = (standings_res.get("standings") or [])[:5]
+
+    latest_sessions = []
+    latest_competition_id = None
+    for s in recent_docs:
+        sid = str(s["_id"])
+        sess_type = s.get("session_type") or ""
+        if latest_competition_id is None and sess_type == "COMPETITION":
+            latest_competition_id = sid
+        if len(latest_sessions) < 4:
+            podium = _extract_session_podium((s.get("results_data") or {}).get("results") or [], limit=3)
+            latest_sessions.append({
+                "id": sid,
+                "title": s.get("title") or "",
+                "date": str(s.get("date") or "")[:10],
+                "time": s.get("time") or "",
+                "event_place": s.get("event_place") or "",
+                "event_country": s.get("event_country") or "",
+                "category_code": s.get("category_code") or "",
+                "session_type": sess_type,
+                "hillSize": s.get("hillSize"),
+                "hillType": s.get("hillType") or "",
+                "season": str(s.get("season") or ""),
+                "podium": podium,
+            })
+
+    if latest_competition_id is None and latest_sessions:
+        latest_competition_id = latest_sessions[0]["id"]
+
+    return {
+        "next_competition": next_comp,
+        "latest_competition_id": latest_competition_id,
+        "latest_sessions": latest_sessions,
+        "standings": {
+            "season": standings_res.get("season") or active_season,
+            "category": "WC",
+            "total_events": standings_res.get("total_events") or 0,
+            "top5": top5,
+        },
+    }
+
+
+@router.get("/dashboard")
+@limiter.limit("60/minute")
+async def get_stats_dashboard(
+    request: Request,
+    dictionaries: DictionaryService = Depends(get_dictionary_service),
+):
+    """Zwraca dane zbiorcze na główny Pulpit (najbliższe zawody, ostatnie wyniki, TOP 5 PŚ)."""
+    cache_key = "stats_dashboard_wc_v1"
+    cached = get_cached_value("short", cache_key)
+    if cached is not None:
+        return cached
+
+    db = request.app.database
+    payload = await build_dashboard_payload(db, dictionaries)
+    set_cached_value("short", cache_key, payload)
+    return payload
+
