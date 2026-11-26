@@ -534,16 +534,17 @@ async def create_notification(
     title: str,
     message: str,
     league_id: Optional[str] = None,
+    link: Optional[str] = None,
 ) -> None:
     created_at = _now_iso()
-    link = f"/draft?league={league_id}" if league_id else "/draft"
+    resolved_link = link if link else (f"/draft?league={league_id}" if league_id else "/draft")
     res = await db["notifications"].insert_one({
         "user_id": str(user_id),
         "type": notif_type,
         "title": title,
         "message": message,
         "league_id": str(league_id) if league_id else None,
-        "link": link,
+        "link": resolved_link,
         "is_read": False,
         "created_at": created_at,
     })
@@ -554,7 +555,7 @@ async def create_notification(
         "title": title,
         "message": message,
         "league_id": str(league_id) if league_id else None,
-        "link": link,
+        "link": resolved_link,
         "created_at": created_at,
     })
 

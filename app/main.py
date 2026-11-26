@@ -9,6 +9,7 @@ from app.controller.hills_controller import router as hills_router
 from app.controller.prediction_controller import router as prediction_router
 from app.controller.esm_controller import router as esm_router
 from app.controller.draft_controller import router as draft_router
+from app.controller.support_controller import router as support_router
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from fastapi import Request
@@ -248,4 +249,5 @@ app.include_router(hills_router)
 app.include_router(prediction_router)
 app.include_router(esm_router)
 app.include_router(draft_router)
+app.include_router(support_router)
 
