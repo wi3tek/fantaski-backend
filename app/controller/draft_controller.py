@@ -32,6 +32,7 @@ from app.services.draft_service import (
     mark_turn_notifications_read,
     publish_league_refresh_to_participants,
     serialize_league,
+    sync_leagues_user_profiles,
 )
 
 router = APIRouter(prefix="/draft", tags=["Fantasy Draft & Notifications"])
@@ -399,6 +400,7 @@ async def list_my_draft_leagues(request: Request, current_user: dict = Depends(g
         {"participants.user_id": uid}
     ).sort("updated_at", -1).to_list(length=50)
 
+    await sync_leagues_user_profiles(db, leagues)
     for lg in leagues:
         await ensure_league_invite_code(db, lg)
 

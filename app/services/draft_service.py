@@ -690,12 +690,62 @@ async def mark_turn_notifications_read(db, user_id: str, league_id: str) -> None
     )
 
 
+async def sync_leagues_user_profiles(db, leagues: List[Dict[str, Any]]) -> None:
+    """
+    Synchronizuje aktualne nazwy (name) i avatary (picture) uczestników oraz twórcy
+    z kolekcji 'users', aby zmiany nazwy profilu były widoczne we wszystkich ligach drafta.
+    """
+    if not leagues:
+        return
+
+    raw_ids: Set[str] = set()
+    for lg in leagues:
+        cid = lg.get("creator_id")
+        if cid:
+            raw_ids.add(str(cid))
+        for p in lg.get("participants") or []:
+            uid = p.get("user_id")
+            if uid:
+                raw_ids.add(str(uid))
+
+    oids: List[ObjectId] = []
+    for raw in raw_ids:
+        try:
+            if ObjectId.is_valid(raw):
+                oids.append(ObjectId(raw))
+        except Exception:
+            pass
+    if not oids:
+        return
+
+    user_docs = await db["users"].find(
+        {"_id": {"$in": oids}},
+        {"name": 1, "picture": 1},
+    ).to_list(length=len(oids))
+
+    users_by_id: Dict[str, Dict[str, Any]] = {str(u["_id"]): u for u in user_docs}
+    for lg in leagues:
+        cid = str(lg.get("creator_id") or "")
+        if cid in users_by_id and users_by_id[cid].get("name"):
+            lg["creator_name"] = users_by_id[cid]["name"]
+        for p in lg.get("participants") or []:
+            uid = str(p.get("user_id") or "")
+            u = users_by_id.get(uid)
+            if not u:
+                continue
+            if u.get("name"):
+                p["name"] = u["name"]
+            if "picture" in u and u.get("picture") is not None:
+                p["picture"] = u.get("picture") or ""
+
+
 async def calculate_league_standings(db, league: Dict[str, Any]) -> Dict[str, Any]:
     """
     Zlicza punkty zawodników wybranych przez uczestników ligi wyłącznie na podstawie
     sezonu, turnieju (w tym TCS / Raw Air / Planica 7 / OWG / WSC / SFWC / GP / WC / COC / FC)
     oraz zakresu dat [scoring_from_date, scoring_to_date] (bez blokowania po ID sesji!).
     """
+    await sync_leagues_user_profiles(db, [league])
     season = str(league.get("season") or DEFAULT_DRAFT_SEASON)
     category_code = str(league.get("category_code") or "WC").strip().upper()
     db_cat = get_db_category_for_tournament(category_code)

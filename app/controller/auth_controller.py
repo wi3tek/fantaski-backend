@@ -172,6 +172,24 @@ async def update_my_profile(
     await db["users"].update_one({"_id": ObjectId(user_id)}, {"$set": update_data})
     current_user.update(update_data)
 
+    # Propagacja nowej nazwy / avatara do zapisanych dokumentów lig drafta
+    if "name" in update_data:
+        await db["draft_leagues"].update_many(
+            {"creator_id": str(user_id)},
+            {"$set": {"creator_name": update_data["name"]}},
+        )
+    part_set: dict = {}
+    if "name" in update_data:
+        part_set["participants.$[elem].name"] = update_data["name"]
+    if "picture" in update_data:
+        part_set["participants.$[elem].picture"] = update_data["picture"]
+    if part_set:
+        await db["draft_leagues"].update_many(
+            {"participants.user_id": str(user_id)},
+            {"$set": part_set},
+            array_filters=[{"elem.user_id": str(user_id)}],
+        )
+
     token_payload = {
         "sub": str(current_user["_id"]),
         "email": current_user["email"],
