@@ -23,6 +23,7 @@ from app.services.scrapers.results_job_manager import (
     save_scraped_events_to_db,
 )
 from app.services.scrapers.fis_athletes_scraper import fetch_all_athletes_by_chunks
+from app.services.draft_service import notify_season_started_for_session
 from app.services.athletes_esm_prices import update_esm_prices
 from app.services.scrapers.pdf_training_scraper import (
     get_pdf_training_job_manager,
@@ -637,6 +638,7 @@ async def approve_session_review(request: Request, session_id: str):
     review_session.pop("original_checksum", None)
     await db["sessions"].replace_one({"_id": session_id}, review_session, upsert=True)
     await db["sessions_review"].delete_one({"_id": session_id})
+    await notify_season_started_for_session(db, review_session)
 
     return {"message": f"Zmiany dla sesji {session_id} zostały zatwierdzone i zapisane w bazie."}
 
@@ -773,6 +775,9 @@ async def approve_all_session_reviews(request: Request):
         for i in range(0, len(sessions_ops), batch_size):
             await db["sessions"].bulk_write(sessions_ops[i:i + batch_size], ordered=False)
         await db["sessions_review"].delete_many({"_id": {"$in": review_ids_to_del}})
+        for approved_doc in reviews:
+            if str(approved_doc.get("session_type") or "").upper() == "COMPETITION":
+                await notify_season_started_for_session(db, approved_doc)
 
     return {"message": f"Pomyślnie zatwierdzono {len(reviews)} sesji."}
 

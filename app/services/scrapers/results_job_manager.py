@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
 
+from app.services.draft_service import notify_season_started_for_session
 from app.services.hill_service import bulk_record_hill_versions, resolve_event_hill_data
 from app.services.scrapers.generate_results import process_single_race, run_scraper_pipeline
 from app.services.weather.weather_service import get_weather_service
@@ -228,6 +229,7 @@ async def save_scraped_events_to_db(
                 session["_id"] = session_composite_id
                 await sessions_col.insert_one(session)
                 stats["inserted"] += 1
+                await notify_season_started_for_session(sessions_col.database, session)
             else:
                 existing_complete = _has_complete_results(existing_session)
 
@@ -264,6 +266,7 @@ async def save_scraped_events_to_db(
                         )
                         await review_col.delete_one({"_id": session_composite_id})
                         stats["recovered_missing"] += 1
+                        await notify_season_started_for_session(sessions_col.database, session)
                     continue
 
                 existing_hash = generate_full_checksum(existing_session)

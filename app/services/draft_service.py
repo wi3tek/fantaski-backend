@@ -537,7 +537,7 @@ async def create_notification(
     link: Optional[str] = None,
 ) -> None:
     created_at = _now_iso()
-    resolved_link = link if link else (f"/draft?league={league_id}" if league_id else "/draft")
+    resolved_link = link if link else (f"/draft/league/{league_id}" if league_id else "/draft")
     res = await db["notifications"].insert_one({
         "user_id": str(user_id),
         "type": notif_type,
@@ -558,6 +558,112 @@ async def create_notification(
         "link": resolved_link,
         "created_at": created_at,
     })
+
+
+async def notify_season_started_for_session(db, session_doc: Optional[Dict[str, Any]]) -> None:
+    """
+    Wysyła jednorazowe powiadomienie SEASON_STARTED, gdy pojawi się pierwszy ukończony
+    konkurs bieżącego/przyszłego sezonu (globalnie dla PŚ oraz per aktywna liga drafta).
+    """
+    if not session_doc:
+        return
+    try:
+        if str(session_doc.get("session_type") or "").upper() != "COMPETITION":
+            return
+        res_data = session_doc.get("results_data") or {}
+        if session_doc.get("is_cancelled") is True or res_data.get("is_cancelled") is True:
+            return
+        results = res_data.get("results") or []
+        if not results:
+            return
+
+        season_str = str(session_doc.get("season") or "").strip()
+        if not season_str:
+            return
+        try:
+            season_int = int(season_str)
+        except ValueError:
+            return
+
+        # Chroni przed spamem podczas dociągania historycznych sezonów archiwalnych
+        if season_int < datetime.date.today().year:
+            return
+
+        s_cat = str(session_doc.get("category_code") or "").strip().upper()
+        s_date = str(session_doc.get("date") or "")[:10]
+        place = str(session_doc.get("event_place") or "Konkurs").strip()
+
+        # 1. Globalne otwarcie sezonu zimowego (pierwsze zawody WC w danym sezonie)
+        if s_cat == "WC":
+            existing_wc_count = await db["sessions"].count_documents({
+                "season": {"$in": _season_query_values(season_str)},
+                "category_code": "WC",
+                "session_type": "COMPETITION",
+                "results_data.is_cancelled": {"$ne": True},
+                "results_data.results.0": {"$exists": True},
+            })
+            if existing_wc_count <= 3:
+                marker_res = await db["system_events"].update_one(
+                    {"_id": f"season_start_{season_str}_WC"},
+                    {"$setOnInsert": {"created_at": _now_iso(), "season": season_str, "category_code": "WC", "place": place, "date": s_date}},
+                    upsert=True,
+                )
+                if marker_res.upserted_id is not None:
+                    users_cursor = db["users"].find({"is_active": {"$ne": False}}, {"_id": 1})
+                    async for u in users_cursor:
+                        await create_notification(
+                            db=db,
+                            user_id=str(u["_id"]),
+                            notif_type="SEASON_STARTED",
+                            title=f"Start sezonu {season_str}!",
+                            message=f"Pierwszy konkurs ({place}, {s_date}) zainaugurował nowy sezon Pucharu Świata!",
+                            league_id=None,
+                            link="/draft",
+                        )
+
+        # 2. Powiadomienie dla aktywnych lig drafta czekających na pierwszy punktowany konkurs
+        active_leagues = await db["draft_leagues"].find({
+            "season": {"$in": _season_query_values(season_str)},
+            "status": {"$in": ["LEAGUE_ACTIVE", "COMPLETED"]},
+            "season_started_notified": {"$ne": True},
+        }).to_list(length=500)
+
+        for lg in active_leagues:
+            if lg.get("status") == "COMPLETED" and not lg.get("league_started_at"):
+                continue
+            lg_cat = str(lg.get("category_code") or "WC").strip().upper()
+            if get_db_category_for_tournament(lg_cat) != s_cat:
+                continue
+            if not matches_draft_tournament(session_doc, season_str, lg_cat):
+                continue
+            from_dt = str(lg.get("scoring_from_date") or "").strip()
+            to_dt = str(lg.get("scoring_to_date") or "").strip()
+            if from_dt and s_date and s_date < from_dt:
+                continue
+            if to_dt and s_date and s_date > to_dt:
+                continue
+
+            claimed = await db["draft_leagues"].find_one_and_update(
+                {"_id": lg["_id"], "season_started_notified": {"$ne": True}},
+                {"$set": {"season_started_notified": True}},
+            )
+            if not claimed:
+                continue
+
+            lid_str = str(lg["_id"])
+            for p in lg.get("participants") or []:
+                if p.get("status") == "ACCEPTED" and p.get("user_id"):
+                    await create_notification(
+                        db=db,
+                        user_id=str(p["user_id"]),
+                        notif_type="SEASON_STARTED",
+                        title="Start punktowania sezonu!",
+                        message=f"Sezon w lidze '{lg.get('name')}' wystartował — rozegrano pierwszy punktowany konkurs: {place} ({s_date}).",
+                        league_id=lid_str,
+                        link=f"/draft/league/{lid_str}",
+                    )
+    except Exception:
+        pass
 
 
 def publish_league_refresh_to_participants(league: Dict[str, Any], event_kind: str = "league_update") -> None:
@@ -662,6 +768,25 @@ async def calculate_league_standings(db, league: Dict[str, Any]) -> Dict[str, An
                 "points": int(pts) if pts.is_integer() else round(pts, 1),
             })
 
+    # Hurtowe dociągnięcie zdjęć (competitor_id_from_url) dla wszystkich skoczków w składach (również w starszych ligach)
+    pick_fis_ints: Set[int] = set()
+    for p in league.get("participants") or []:
+        for pk in p.get("picks") or []:
+            try:
+                if pk.get("fis_code") is not None:
+                    pick_fis_ints.add(int(pk["fis_code"]))
+            except (TypeError, ValueError):
+                pass
+    avatar_by_fis: Dict[str, Any] = {}
+    if pick_fis_ints:
+        ath_docs = await db["athletes"].find(
+            {"fis_code": {"$in": list(pick_fis_ints)}},
+            {"fis_code": 1, "competitor_id_from_url": 1},
+        ).to_list(length=len(pick_fis_ints))
+        for ad in ath_docs:
+            if ad.get("competitor_id_from_url"):
+                avatar_by_fis[str(ad["fis_code"]).strip()] = ad["competitor_id_from_url"]
+
     standings = []
     for p in league.get("participants") or []:
         if p.get("status") != "ACCEPTED":
@@ -670,10 +795,14 @@ async def calculate_league_standings(db, league: Dict[str, Any]) -> Dict[str, An
         total_pts = 0.0
         for pk in p.get("picks") or []:
             fk = str(pk.get("fis_code"))
+            comp_url_id = pk.get("competitor_id_from_url") or avatar_by_fis.get(fk)
+            if comp_url_id and not pk.get("competitor_id_from_url"):
+                pk["competitor_id_from_url"] = comp_url_id
             ath_pts = points_by_fis.get(fk, 0.0)
             total_pts += ath_pts
             enriched_picks.append({
                 **pk,
+                **({"competitor_id_from_url": comp_url_id} if comp_url_id else {}),
                 "points": int(ath_pts) if ath_pts.is_integer() else round(ath_pts, 1),
                 "events": events_by_fis.get(fk, []),
             })
@@ -772,3 +901,90 @@ def make_random_order(user_ids: List[str]) -> List[str]:
     shuffled = list(user_ids)
     random.shuffle(shuffled)
     return shuffled
+
+
+def get_current_fis_season_code() -> str:
+    """Zwraca kod bieżącego sezonu PŚ FIS (lipiec–czerwiec -> rok zakończenia sezonu)."""
+    today = datetime.date.today()
+    return str(today.year + (1 if today.month >= 7 else 0))
+
+
+async def get_current_wc_season_points_map(db) -> Tuple[str, Dict[int, float]]:
+    """
+    Zwraca mapę {fis_code: suma_punktów_PŚ} z bieżącego sezonu Pucharu Świata
+    na podstawie sklasyfikowanych wyników oficjalnych konkursów WC w bazie 'sessions'.
+    """
+    current_season = get_current_fis_season_code()
+    cache_key = f"draft_wc_points_map_{current_season}"
+    cached = get_cached_value("short", cache_key)
+    if cached is not None:
+        return cached
+
+    sessions = await db["sessions"].find(
+        {
+            "category_code": "WC",
+            "season": {"$in": _season_query_values(current_season)},
+            "session_type": {"$regex": "COMPETITION$", "$options": "i"},
+            "is_cancelled": {"$ne": True},
+            "results_data.is_cancelled": {"$ne": True},
+            "results_data.results.0": {"$exists": True},
+        },
+        {"_id": 1, "race_id": 1, "raceId": 1, "results_data.results": 1},
+    ).to_list(length=200)
+
+    seen_races: Set[str] = set()
+    points_by_fis: Dict[int, float] = {}
+    for s in sessions:
+        race_key = str(s.get("raceId") or s.get("race_id") or s.get("_id"))
+        if race_key in seen_races:
+            continue
+        seen_races.add(race_key)
+        for r in (s.get("results_data") or {}).get("results") or []:
+            st = str(r.get("status") or "").strip()
+            if st and st != "Classified":
+                continue
+            raw_fis = r.get("fis_code")
+            if raw_fis is None:
+                continue
+            try:
+                fis_int = int(raw_fis)
+            except (ValueError, TypeError):
+                continue
+            raw_pts = r.get("competition_points")
+            if raw_pts is None:
+                raw_pts = r.get("world_cup_points")
+            try:
+                pts = float(raw_pts or 0)
+            except (ValueError, TypeError):
+                pts = 0.0
+            if pts > 0:
+                points_by_fis[fis_int] = points_by_fis.get(fis_int, 0.0) + pts
+
+    result = (current_season, points_by_fis)
+    set_cached_value("short", cache_key, result)
+    return result
+
+
+async def get_active_athlete_countries(db) -> List[Dict[str, Any]]:
+    """Zwraca wszystkie dostępne kody narodowości aktywnych skoczków wraz z licznością."""
+    cache_key = "draft_active_athlete_countries"
+    cached = get_cached_value("medium", cache_key)
+    if cached is not None:
+        return cached
+
+    rows = await db["athletes"].aggregate([
+        {"$match": {"status": "Active", "country_code": {"$exists": True, "$nin": [None, ""]}}},
+        {"$group": {"_id": "$country_code", "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}},
+    ]).to_list(length=300)
+
+    merged: Dict[str, int] = {}
+    for row in rows:
+        code = str(row.get("_id") or "").strip().upper()
+        if not code:
+            continue
+        merged[code] = merged.get(code, 0) + int(row.get("count") or 0)
+
+    out = [{"code": c, "count": merged[c]} for c in sorted(merged.keys())]
+    set_cached_value("medium", cache_key, out)
+    return out

@@ -8,6 +8,7 @@ from pymongo import UpdateOne
 
 from app.services.scrapers.generate_results import run_scraper_pipeline
 from app.services.weather.weather_service import get_weather_service
+from app.services.draft_service import notify_season_started_for_session
 from app.services.hill_service import resolve_event_hill_data, bulk_record_hill_versions
 import hashlib
 import json
@@ -287,6 +288,7 @@ class NightlyBatchScraper:
                             session["_id"] = session_composite_id
                             await sessions_col.insert_one(session)
                             self.inserted_sessions += 1
+                            await notify_season_started_for_session(db, session)
                         else:
                             existing_has_res = bool(
                                 ((existing.get("results_data") or {}).get("results"))
@@ -316,6 +318,7 @@ class NightlyBatchScraper:
                                 session["_id"] = session_composite_id
                                 await sessions_col.replace_one({"_id": session_composite_id}, session)
                                 self.updated_sessions += 1
+                                await notify_season_started_for_session(db, session)
 
                 # Zapis wersji skoczni
                 if hill_ops_dict:

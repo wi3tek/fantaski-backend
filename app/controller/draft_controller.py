@@ -24,6 +24,8 @@ from app.services.draft_service import (
     draft_broker,
     ensure_league_invite_code,
     generate_unique_invite_code,
+    get_active_athlete_countries,
+    get_current_wc_season_points_map,
     get_finished_competitions_for_cutoff,
     get_snake_turn_user_id,
     make_random_order,
@@ -222,20 +224,39 @@ async def preview_cutoff_competitions(
     return await get_finished_competitions_for_cutoff(db, season=season.strip(), category_code=cat)
 
 
+@router.get("/athletes/countries")
+@limiter.limit("60/minute")
+async def get_draft_athlete_countries(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Zwraca listę wszystkich narodowości aktywnych skoczków do wielokrotnego filtra w Drafcie."""
+    _require_draft_plan(current_user)
+    db = request.app.database
+    return await get_active_athlete_countries(db)
+
+
 @router.get("/athletes/active")
 @limiter.limit("60/minute")
 async def get_active_athletes_pool(
     request: Request,
     q: str = Query(default="", max_length=60),
-    country: str = Query(default="", max_length=10),
+    country: str = Query(default="", max_length=350),
+    countries: str = Query(default="", max_length=350),
+    sort_by: str = Query(default="wc_points", max_length=20),
     current_user: dict = Depends(get_current_user),
 ):
-    """Zwraca pulę aktywnych skoczków do wyboru w Drafcie (tylko status=Active)."""
+    """Zwraca pulę aktywnych skoczków do wyboru w Drafcie (tylko status=Active) z punktami bieżącego sezonu PŚ."""
     _require_draft_plan(current_user)
     db = request.app.database
     flt: dict = {"status": "Active"}
-    if country.strip():
-        flt["country_code"] = country.strip().upper()
+
+    raw_countries = f"{country},{countries}"
+    selected_countries = list(dict.fromkeys(
+        c.strip().upper() for c in raw_countries.split(",") if c.strip()
+    ))
+    if selected_countries:
+        flt["country_code"] = {"$in": selected_countries}
 
     docs = await db["athletes"].find(
         flt,
@@ -247,24 +268,56 @@ async def get_active_athletes_pool(
             "wc_points": 1,
             "competitor_id_from_url": 1,
         },
-    ).sort([("price", -1), ("full_name", 1)]).to_list(length=1600)
+    ).to_list(length=2000)
+
+    wc_season, wc_points_map = await get_current_wc_season_points_map(db)
 
     needle = q.strip().lower()
     out = []
     for a in docs:
         name = a.get("full_name") or ""
-        cc = a.get("country_code") or ""
+        cc = str(a.get("country_code") or "").strip().upper()
         fis = a.get("fis_code")
         if needle and needle not in name.lower() and needle not in cc.lower() and needle not in str(fis or ""):
             continue
+        try:
+            fis_int = int(fis) if fis is not None else None
+        except (ValueError, TypeError):
+            fis_int = None
+
+        if fis_int is not None and fis_int in wc_points_map:
+            raw_wc = wc_points_map[fis_int]
+        else:
+            raw_wc = float(a.get("wc_points") or 0)
+        wc_clean = int(raw_wc) if float(raw_wc).is_integer() else round(float(raw_wc), 1)
+
         out.append({
             "fis_code": fis,
             "full_name": name,
             "country_code": cc,
             "price": a.get("price"),
+            "wc_points": wc_clean,
+            "wc_season": wc_season,
             "competitor_id_from_url": a.get("competitor_id_from_url"),
         })
-    return out[:150]
+
+    sort_mode = sort_by.strip().lower()
+    if sort_mode == "name":
+        out.sort(key=lambda x: (str(x.get("full_name") or "").lower(), str(x.get("fis_code") or "")))
+    elif sort_mode == "price":
+        out.sort(key=lambda x: (
+            -(float(x["price"]) if x.get("price") is not None else -1.0),
+            -float(x.get("wc_points") or 0),
+            str(x.get("full_name") or "").lower(),
+        ))
+    else:
+        out.sort(key=lambda x: (
+            -float(x.get("wc_points") or 0),
+            -(float(x["price"]) if x.get("price") is not None else -1.0),
+            str(x.get("full_name") or "").lower(),
+        ))
+
+    return out[:200]
 
 
 @router.get("/users/search")
@@ -687,6 +740,7 @@ async def invite_user_to_draft_league(
         if curr_st == "INVITED":
             raise HTTPException(status_code=400, detail="Zaproszenie zostało już wysłane.")
         participants[existing_idx]["status"] = "INVITED"
+        participants[existing_idx]["invited_by"] = uid
     else:
         participants.append({
             "user_id": target_uid,
@@ -694,6 +748,7 @@ async def invite_user_to_draft_league(
             "picture": target_user.get("picture") or "",
             "role": str(target_user.get("role") or Role.USER).upper(),
             "status": "INVITED",
+            "invited_by": uid,
             "draft_order": len(participants),
             "picks": [],
         })
@@ -743,7 +798,8 @@ async def respond_to_draft_invite(
 
     action = payload.action.strip().lower()
     if action == "accept":
-        if participants[p_idx].get("status") != "ACCEPTED":
+        was_accepted = participants[p_idx].get("status") == "ACCEPTED"
+        if not was_accepted:
             eligible, reason, _ = await check_user_draft_eligibility(db, current_user)
             if not eligible:
                 raise HTTPException(status_code=403, detail=reason)
@@ -756,6 +812,17 @@ async def respond_to_draft_invite(
             {"_id": lid},
             {"$set": {"participants": participants, "draft_order_user_ids": order_ids, "updated_at": _now_iso()}},
         )
+        if not was_accepted:
+            inviter_id = str(participants[p_idx].get("invited_by") or league.get("creator_id") or "")
+            if inviter_id and inviter_id != uid:
+                await create_notification(
+                    db=db,
+                    user_id=inviter_id,
+                    notif_type="DRAFT_INVITE_ACCEPTED",
+                    title="Zaproszenie zaakceptowane!",
+                    message=f"{current_user.get('name') or 'Gracz'} przyjął zaproszenie do ligi '{league.get('name')}'.",
+                    league_id=str(lid),
+                )
     elif action == "decline":
         if league.get("creator_id") == uid:
             raise HTTPException(status_code=400, detail="Założyciel nie może odrzucić własnej ligi.")
@@ -773,6 +840,94 @@ async def respond_to_draft_invite(
     publish_league_refresh_to_participants(fresh)
     standings_data = await calculate_league_standings(db, fresh)
     return serialize_league(fresh, standings_data)
+
+
+@router.post("/leagues/{league_id}/leave")
+@limiter.limit("20/minute")
+async def leave_draft_league(
+    league_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Pozwala zaakceptowanemu uczestnikowi (innemu niż założyciel) dobrowolnie opuścić ligę drafta."""
+    _require_draft_plan(current_user)
+    db = request.app.database
+    lid = _oid_or_400(league_id, "ligi")
+    league = await db["draft_leagues"].find_one({"_id": lid})
+    if not league:
+        raise HTTPException(status_code=404, detail="Nie znaleziono ligi.")
+
+    uid = str(current_user["_id"])
+    if str(league.get("creator_id")) == uid:
+        raise HTTPException(
+            status_code=400,
+            detail="Założyciel nie może opuścić własnej ligi — możesz ją usunąć.",
+        )
+
+    participants = list(league.get("participants") or [])
+    leaving = next((p for p in participants if p.get("user_id") == uid), None)
+    if not leaving:
+        raise HTTPException(status_code=403, detail="Nie jesteś uczestnikiem tej ligi.")
+
+    new_participants = [p for p in participants if p.get("user_id") != uid]
+    accepted_remaining = [p for p in new_participants if p.get("status") == "ACCEPTED"]
+    accepted_ids = {p["user_id"] for p in accepted_remaining}
+    new_order_ids = [x for x in (league.get("draft_order_user_ids") or []) if x in accepted_ids]
+    for p in accepted_remaining:
+        if p["user_id"] not in new_order_ids:
+            new_order_ids.append(p["user_id"])
+
+    order_map = {u: idx for idx, u in enumerate(new_order_ids)}
+    for p in new_participants:
+        if p.get("status") == "ACCEPTED" and p["user_id"] in order_map:
+            p["draft_order"] = order_map[p["user_id"]]
+
+    now = _now_iso()
+    updates: dict = {
+        "participants": new_participants,
+        "draft_order_user_ids": new_order_ids,
+        "updated_at": now,
+    }
+
+    curr_status = str(league.get("status") or "LOBBY")
+    if curr_status == "ACTIVE_DRAFT":
+        picks_per_player = int(league.get("picks_per_player") or DEFAULT_PICKS_PER_PLAYER)
+        if len(new_order_ids) < 2:
+            for p in new_participants:
+                p["picks"] = []
+            updates["status"] = "LOBBY"
+            updates["current_pick_index"] = 0
+            updates["current_turn_user_id"] = None
+        else:
+            total_done = sum(len(p.get("picks") or []) for p in accepted_remaining)
+            total_picks = len(new_order_ids) * picks_per_player
+            if total_done >= total_picks:
+                updates["status"] = "DRAFT_FINISHED"
+                updates["current_pick_index"] = total_picks
+                updates["current_turn_user_id"] = None
+                updates["completed_at"] = now
+            else:
+                next_uid = get_snake_turn_user_id(new_order_ids, total_done)
+                updates["current_pick_index"] = total_done
+                updates["current_turn_user_id"] = next_uid
+
+    await db["draft_leagues"].update_one({"_id": lid}, {"$set": updates})
+    await mark_turn_notifications_read(db, uid, str(lid))
+
+    creator_id = str(league.get("creator_id") or "")
+    if creator_id and creator_id != uid:
+        await create_notification(
+            db=db,
+            user_id=creator_id,
+            notif_type="DRAFT_LEFT",
+            title="Gracz opuścił ligę",
+            message=f"{current_user.get('name') or 'Gracz'} opuścił ligę '{league.get('name')}'.",
+            league_id=str(lid),
+        )
+
+    fresh = await db["draft_leagues"].find_one({"_id": lid})
+    publish_league_refresh_to_participants(fresh)
+    return {"ok": True, "message": "Opuszczono ligę drafta."}
 
 
 @router.delete("/leagues/{league_id}/participants/{target_user_id}")
@@ -871,6 +1026,8 @@ async def start_draft_league(
     )
 
     if first_user_id:
+        first_participant = next((p for p in accepted if p["user_id"] == first_user_id), None)
+        first_name = (first_participant or {}).get("name") or "Gracz"
         await create_notification(
             db=db,
             user_id=first_user_id,
@@ -879,6 +1036,16 @@ async def start_draft_league(
             message=f"Draft w lidze '{league.get('name')}' wystartował! Wybierz 1. zawodnika (Runda 1/{picks_per_player}).",
             league_id=str(lid),
         )
+        for p in accepted:
+            if p["user_id"] != first_user_id:
+                await create_notification(
+                    db=db,
+                    user_id=p["user_id"],
+                    notif_type="DRAFT_STARTED",
+                    title="Draft rozpoczęty!",
+                    message=f"Gospodarz rozpoczął draft w lidze '{league.get('name')}'. Jako pierwszy wybiera {first_name}.",
+                    league_id=str(lid),
+                )
 
     fresh = await db["draft_leagues"].find_one({"_id": lid})
     publish_league_refresh_to_participants(fresh)
@@ -910,7 +1077,7 @@ async def make_draft_pick(
 
     athlete = await db["athletes"].find_one(
         {"fis_code": payload.fis_code, "status": "Active"},
-        {"fis_code": 1, "full_name": 1, "country_code": 1, "status": 1},
+        {"fis_code": 1, "full_name": 1, "country_code": 1, "status": 1, "competitor_id_from_url": 1},
     )
     if not athlete:
         raise HTTPException(status_code=400, detail="Wybrany zawodnik nie istnieje lub nie ma statusu aktywnego (Active).")
@@ -937,6 +1104,7 @@ async def make_draft_pick(
                 "fis_code": athlete["fis_code"],
                 "full_name": athlete.get("full_name") or str(athlete["fis_code"]),
                 "country_code": athlete.get("country_code") or "",
+                "competitor_id_from_url": athlete.get("competitor_id_from_url"),
                 "picked_at": now,
             })
             break
@@ -1030,19 +1198,37 @@ async def launch_draft_season_league(
     )
 
     for p in league.get("participants") or []:
-        if p.get("status") == "ACCEPTED" and p.get("user_id") != uid:
+        if p.get("status") == "ACCEPTED" and p.get("user_id"):
             await create_notification(
                 db=db,
                 user_id=p["user_id"],
                 notif_type="LEAGUE_STARTED",
                 title="Liga Drafta rozpoczęta!",
-                message=f"Gospodarz uruchomił ligę '{league.get('name')}'. Tabela klasyfikacji generalnej jest już dostępna!",
+                message=f"Liga '{league.get('name')}' wystartowała! Tabela klasyfikacji generalnej jest już aktywna.",
                 league_id=str(lid),
             )
 
     fresh = await db["draft_leagues"].find_one({"_id": lid})
     publish_league_refresh_to_participants(fresh)
     standings_data = await calculate_league_standings(db, fresh)
+    if (standings_data or {}).get("counted_competitions"):
+        claimed = await db["draft_leagues"].find_one_and_update(
+            {"_id": lid, "season_started_notified": {"$ne": True}},
+            {"$set": {"season_started_notified": True}},
+        )
+        if claimed:
+            first_c = standings_data["counted_competitions"][0]
+            for p in fresh.get("participants") or []:
+                if p.get("status") == "ACCEPTED" and p.get("user_id"):
+                    await create_notification(
+                        db=db,
+                        user_id=p["user_id"],
+                        notif_type="SEASON_STARTED",
+                        title="Start punktowania sezonu!",
+                        message=f"Sezon w lidze '{fresh.get('name')}' jest już w grze — pierwsze wliczone zawody: {first_c.get('event_place')} ({first_c.get('date')}).",
+                        league_id=str(lid),
+                    )
+            fresh = await db["draft_leagues"].find_one({"_id": lid})
     return serialize_league(fresh, standings_data)
 
 
